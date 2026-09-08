@@ -1,3 +1,8 @@
+# Attention
+The "docs" (this folder), "samples" and other folder/md files come from the O2Emu Project (https://github.com/samueltgg12/o2emu) made by myself. Use this folder for all documentation and when implementing all components of the emulator.
+
+
+
 # SGI O2 Emulator — Hardware Documentation
 
 **Phase 1 (Research) and Phase 2 (Emulation) are complete.** Every hardware
