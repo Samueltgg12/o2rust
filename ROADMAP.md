@@ -120,7 +120,7 @@ prompt with accurate hardware behavior.
 
 **Goal:** make the emulator fast, polished, and cross-platform.
 
-- [ ] JIT compilation (dynamic recompilation of MIPS code)
+- [ ] Cranelift JIT compilation (dynamic recompilation of MIPS code)
 - [ ] Performance optimizations (caching, threading, SIMD)
 - [ ] GUI improvements (scaling, filters, save states, config UI)
 - [ ] Cross-platform support (Windows, macOS, Linux)
