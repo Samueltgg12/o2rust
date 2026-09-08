@@ -1,0 +1,18 @@
+[package]
+name = "o2rust-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "egui/eframe GUI for the O2Rust emulator."
+
+[[bin]]
+name = "o2rust-gui"
+path = "src/main.rs"
+
+[dependencies]
+o2rust.workspace = true
+eframe.workspace = true
+egui.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true

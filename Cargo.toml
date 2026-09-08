@@ -1,7 +1,73 @@
-[package]
-name = "o2rust"
+[workspace]
+resolver = "2"
+members = ["cli", "gui"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-description = "An Accurate & Fast SGI O2 Emulator."
 license = "BSD-3-Clause"
+description = "An Accurate & Fast SGI O2 Emulator."
+repository = "https://github.com/samueltgg12/o2rust"
+
+[workspace.dependencies]
+# Core library
+o2rust = { path = "." }
+
+# Logging / tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+log = "0.4"
+
+# Error handling
+thiserror = "2"
+
+# Bit manipulation
+bitflags = "2"
+
+# Byte order helpers
+byteorder = "1"
+
+# GUI (egui + eframe)
+eframe = "0.31"
+egui = "0.31"
+
+# CLI argument parsing
+clap = { version = "4", features = ["derive"] }
+
+# Serialization (save states, config)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Misc
+anyhow = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+opt-level = 1
+
+[package]
+name = "o2rust"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "o2rust"
+path = "src/lib.rs"
+
 [dependencies]
+tracing.workspace = true
+log.workspace = true
+thiserror.workspace = true
+bitflags.workspace = true
+byteorder.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
