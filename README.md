@@ -3,7 +3,7 @@
 
 
 # O2Rust: An Rust-written SGI O2 (IP32/Moosehead) Emulator
-![O2Rust Logo](assets/o2emu-logo.jpg)
+![O2Rust Logo](assets/o2rust-logo.jpg)
 
 
 A from-scratch emulator for the **SGI O2** workstation (codename **"Moosehead"**,

@@ -1,3 +1,8 @@
+## Attention
+The Original "docs" "samples" "assets" and md files are from the O2Emu Project, an C++ Version of this emulator.
+
+
+
 # CLAUDE.md
 
 Project-specific guidance for Claude Code (and other AI assistants) working in
@@ -5,19 +10,19 @@ this repository.
 
 ## What this project is
 
-An emulator for the **SGI O2 (IP32)** workstation. **Phase 1 (Research) and
-Phase 2 (Emulation) are complete** — every hardware subsystem has a sourced
-register map under `docs/`, and the full-fledged C++ emulator is implemented.
-We are now in **Phase 3 (Performance & polish)**.
+An emulator for the **SGI O2 (IP32)** workstation. **Phase 1 (Research) is complete, and
+Phase 2 (Emulation) is our current phase** — every hardware subsystem has a sourced
+register map under `docs/`, and the full-fledged Rust emulator is what we need to do.
+We are currently in **Phase 2 (The Emulation.)**.
 
 ## Phases
 
 - **Phase 1 — Research ✅ complete:** exhaustive, well-sourced hardware
   documentation under `docs/`. All register maps sourced.
-- **Phase 2 — Emulation ✅ complete:** a full-fledged **C++** emulator, as
+- **Phase 2 — Emulation (current):** a full-fledged **Rust** emulator, as
   accurate to the hardware as the documentation and specs allow. CPU, memory,
   graphics, I/O, and the PROM firmware, with a GUI.
-- **Phase 3 — Performance & polish (current):** JIT compilation, optimizations,
+- **Phase 3 — Performance & polish (After Phase 2):** JIT compilation, optimizations,
   GUI improvements, cross-platform support, and full-featured emulator features.
 
 See `ROADMAP.md` for the full plan.
@@ -79,7 +84,6 @@ BSD 3-Clause License. See [LICENSE](LICENSE).
 
 ## Scope guard
 
-Phase 1 (research) and Phase 2 (emulation) are complete; Phase 3 (performance
-& polish) is in scope. When hardware behavior is unclear, consult the ASIC
-specs in `docs/manuals-specs/` first, then the driver sources. Ask the user
+Phase 1 (research) is already complete thanks to the O2Emu Project, The C++ Version of this emulator; Phase 2 (Emulation) is in scope. When hardware behavior is unclear, consult the ASIC
+specs pdf's and md's in `docs/manuals-specs/` first, then the driver sources. Ask the user
 before deviating from documented behavior.
