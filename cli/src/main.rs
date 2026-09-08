@@ -30,13 +30,14 @@ struct Args {
 }
 
 fn main() -> Result<()> {
-    o2rust::log::init();
     let args = Args::parse();
 
     if args.verbose {
-        std::env::set_var("RUST_LOG", "o2rust=debug,o2rust_cli=debug");
-        o2rust::log::init();
+        unsafe {
+            std::env::set_var("RUST_LOG", "o2rust=debug,o2rust_cli=debug");
+        }
     }
+    o2rust::log::init();
 
     o2rust::log::info_msg(&format!("O2Rust v{} — CLI", o2rust::VERSION));
 

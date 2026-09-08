@@ -10,6 +10,6 @@ use o2rust::log;
 fn main() {
     log::init();
     log::info_msg(&format!("O2Rust v{} — SGI O2 (IP32) emulator", o2rust::VERSION));
-    log::info_msg("Core library loaded. Use the `cli` or `gui` crates to run the emulator.
+    log::info_msg("Core library loaded. Use the `cli` or `gui` crates to run the emulator.");
     println!("Hello, world!");
 }

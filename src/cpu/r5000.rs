@@ -672,6 +672,10 @@ impl R5000 {
                     self.state.fcr31 = v;
                 }
             }
+            0x10..=0x1f => {
+                // FPU arithmetic operations
+                self.cop1_fpu(instr);
+            }
             _ => {
                 log::warn_msg(&format!(
                     "Unimplemented COP1 rs 0x{rs:02x} at PC 0x{:08x}",
@@ -680,6 +684,229 @@ impl R5000 {
                 self.exception(ExceptionCode::ReservedInstr);
             }
         }
+    }
+
+    /// Handle FPU arithmetic operations (COP1 with rs >= 0x10)
+    fn cop1_fpu(&mut self, instr: u32) {
+        let fmt = (instr >> 21) & 0x1f;
+        let ft = ((instr >> 16) & 0x1f) as usize;
+        let fs = ((instr >> 11) & 0x1f) as usize;
+        let fd = ((instr >> 6) & 0x1f) as usize;
+        let funct = instr & 0x3f;
+
+        match fmt {
+            0x10 => {
+                // Single precision (S)
+                self.fpu_s(instr, ft, fs, fd, funct);
+            }
+            0x11 => {
+                // Double precision (D)
+                self.fpu_d(instr, ft, fs, fd, funct);
+            }
+            0x14 => {
+                // Word fixed point (W)
+                self.fpu_w(instr, ft, fs, fd, funct);
+            }
+            0x15 => {
+                // Long fixed point (L)
+                self.fpu_l(instr, ft, fs, fd, funct);
+            }
+            _ => {
+                log::warn_msg(&format!(
+                    "Unimplemented FPU fmt 0x{fmt:02x} at PC 0x{:08x}",
+                    self.state.pc
+                ));
+                self.exception(ExceptionCode::ReservedInstr);
+            }
+        }
+    }
+
+    /// Single precision FPU operations
+    fn fpu_s(&mut self, _instr: u32, ft: usize, fs: usize, fd: usize, funct: u32) {
+        let fs_val = f32::from_bits(self.state.fpr[fs] as u32);
+        let _ft_val = f32::from_bits(self.state.fpr[ft] as u32);
+        let fd_val = f32::from_bits(self.state.fpr[fd] as u32);
+
+        let result = match funct {
+            0x00 => fd_val + fs_val,      // ADD.S
+            0x01 => fd_val - fs_val,      // SUB.S
+            0x02 => fd_val * fs_val,      // MUL.S
+            0x03 => fd_val / fs_val,      // DIV.S
+            0x05 => fd_val.abs(),         // ABS.S
+            0x06 => fd_val,         // MOV.S (just copy)
+            0x07 => -fd_val,              // NEG.S
+            0x20 => {
+                // CVT.S.D - convert double to single
+                let d_val = f64::from_bits(self.state.fpr[fs] as u64);
+                d_val as f32
+            }
+            0x24 => {
+                // CVT.S.W - convert word to single
+                fs_val as i32 as f32
+            }
+            0x30..=0x3f => {
+                // Comparison operations
+                let cond = funct & 0x0f;
+                let cmp_result = match cond {
+                    0x00 => fd_val < fs_val,      // C.F.S
+                    0x01 => fd_val == fs_val,     // C.UN.S
+                    0x02 => fd_val <= fs_val,     // C.EQ.S
+                    0x03 => fd_val < fs_val,      // C.UEQ.S
+                    0x04 => fd_val <= fs_val,     // C.OLT.S
+                    0x05 => fd_val < fs_val,      // C.ULT.S
+                    0x06 => fd_val <= fs_val,     // C.OLE.S
+                    0x07 => fd_val < fs_val,      // C.ULE.S
+                    0x08 => fd_val > fs_val,      // C.SF.S
+                    0x09 => fd_val != fs_val,     // C.NGLE.S
+                    0x0a => fd_val >= fs_val,     // C.SEQ.S
+                    0x0b => fd_val > fs_val,      // C.NGL.S
+                    0x0c => fd_val >= fs_val,     // C.LT.S
+                    0x0d => fd_val > fs_val,      // C.NGE.S
+                    0x0e => fd_val >= fs_val,     // C.LE.S
+                    0x0f => fd_val > fs_val,      // C.NGT.S
+                    _ => false,
+                };
+                // Set condition bit in FCR31
+                if cmp_result {
+                    self.state.fcr31 |= 1 << 23;
+                } else {
+                    self.state.fcr31 &= !(1 << 23);
+                }
+                return; // Comparisons don't write to fd
+            }
+            _ => {
+                log::warn_msg(&format!(
+                    "Unimplemented FPU S funct 0x{funct:02x} at PC 0x{:08x}",
+                    self.state.pc
+                ));
+                self.exception(ExceptionCode::ReservedInstr);
+                return;
+            }
+        };
+
+        self.state.fpr[fd] = result.to_bits() as u64;
+    }
+
+    /// Double precision FPU operations
+    fn fpu_d(&mut self, _instr: u32, ft: usize, fs: usize, fd: usize, funct: u32) {
+        let fs_val = f64::from_bits(self.state.fpr[fs] as u64);
+        let _ft_val = f64::from_bits(self.state.fpr[ft] as u64);
+        let fd_val = f64::from_bits(self.state.fpr[fd] as u64);
+
+        let result = match funct {
+            0x00 => fd_val + fs_val,      // ADD.D
+            0x01 => fd_val - fs_val,      // SUB.D
+            0x02 => fd_val * fs_val,      // MUL.D
+            0x03 => fd_val / fs_val,      // DIV.D
+            0x05 => fd_val.abs(),         // ABS.D
+            0x06 => fd_val,               // MOV.D
+            0x07 => -fd_val,              // NEG.D
+            0x20 => {
+                // CVT.D.S - convert single to double
+                let s_val = f32::from_bits(self.state.fpr[fs] as u32);
+                s_val as f64
+            }
+            0x25 => {
+                // CVT.D.W - convert word to double
+                fs_val as i32 as f64
+            }
+            0x30..=0x3f => {
+                // Comparison operations
+                let cond = funct & 0x0f;
+                let cmp_result = match cond {
+                    0x00 => fd_val < fs_val,      // C.F.D
+                    0x01 => fd_val == fs_val,     // C.UN.D
+                    0x02 => fd_val <= fs_val,     // C.EQ.D
+                    0x03 => fd_val < fs_val,      // C.UEQ.D
+                    0x04 => fd_val <= fs_val,     // C.OLT.D
+                    0x05 => fd_val < fs_val,      // C.ULT.D
+                    0x06 => fd_val <= fs_val,     // C.OLE.D
+                    0x07 => fd_val < fs_val,      // C.ULE.D
+                    0x08 => fd_val > fs_val,      // C.SF.D
+                    0x09 => fd_val != fs_val,     // C.NGLE.D
+                    0x0a => fd_val >= fs_val,     // C.SEQ.D
+                    0x0b => fd_val > fs_val,      // C.NGL.D
+                    0x0c => fd_val >= fs_val,     // C.LT.D
+                    0x0d => fd_val > fs_val,      // C.NGE.D
+                    0x0e => fd_val >= fs_val,     // C.LE.D
+                    0x0f => fd_val > fs_val,      // C.NGT.D
+                    _ => false,
+                };
+                // Set condition bit in FCR31
+                if cmp_result {
+                    self.state.fcr31 |= 1 << 23;
+                } else {
+                    self.state.fcr31 &= !(1 << 23);
+                }
+                return; // Comparisons don't write to fd
+            }
+            _ => {
+                log::warn_msg(&format!(
+                    "Unimplemented FPU D funct 0x{funct:02x} at PC 0x{:08x}",
+                    self.state.pc
+                ));
+                self.exception(ExceptionCode::ReservedInstr);
+                return;
+            }
+        };
+
+        self.state.fpr[fd] = result.to_bits() as u64;
+    }
+
+    /// Word fixed point FPU operations
+    fn fpu_w(&mut self, _instr: u32, _ft: usize, fs: usize, fd: usize, funct: u32) {
+        let fs_val = f32::from_bits(self.state.fpr[fs] as u32);
+        let _fd_val = f32::from_bits(self.state.fpr[fd] as u32);
+
+        let result = match funct {
+            0x20 => {
+                // CVT.W.S - convert single to word
+                fs_val as i32 as u32 as u64
+            }
+            0x21 => {
+                // CVT.W.D - convert double to word
+                let d_val = f64::from_bits(self.state.fpr[fs] as u64);
+                d_val as i32 as u32 as u64
+            }
+            _ => {
+                log::warn_msg(&format!(
+                    "Unimplemented FPU W funct 0x{funct:02x} at PC 0x{:08x}",
+                    self.state.pc
+                ));
+                self.exception(ExceptionCode::ReservedInstr);
+                return;
+            }
+        };
+
+        self.state.fpr[fd] = result;
+    }
+
+    /// Long fixed point FPU operations
+    fn fpu_l(&mut self, _instr: u32, _ft: usize, fs: usize, fd: usize, funct: u32) {
+        let fs_val = f32::from_bits(self.state.fpr[fs] as u32);
+        let _fd_val = f32::from_bits(self.state.fpr[fd] as u32);
+
+        let result = match funct {
+            0x20 => {
+                // CVT.L.S - convert single to long
+                fs_val as i64 as u64
+            }
+            0x21 => {
+                // CVT.L.D - convert double to long
+                let d_val = f64::from_bits(self.state.fpr[fs] as u64);
+                d_val as i64 as u64
+            }
+            _ => {
+                log::warn_msg(&format!(
+                    "Unimplemented FPU L funct 0x{funct:02x} at PC 0x{:08x}",
+                    self.state.pc
+                ));
+                self.exception(ExceptionCode::ReservedInstr);
+                return;
+            }
+        };
+
+        self.state.fpr[fd] = result;
     }
 
     // === Exceptions ===
@@ -728,11 +955,6 @@ fn reg_from_index(index: usize) -> Cp0Reg {
     ];
     REGS[index.min(31)]
 }
-
-// Silence unused-import warnings for the status/cause modules (kept for
-// documentation and future use).
-#[allow(unused_imports)]
-use {cause, status};
 
 #[cfg(test)]
 mod tests {
