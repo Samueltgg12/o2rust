@@ -1,7 +1,3 @@
-# Attention:This README.md originally came from the O2Emu Project. O2Rust is a Rust Version of O2Emu. Check O2Emu at (https://github.com/samueltgg12/o2emu)
-
-
-
 # O2Rust: An Rust-written SGI O2 (IP32/Moosehead) Emulator
 ![O2Rust Logo](assets/o2rust-logo.jpg)
 
