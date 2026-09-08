@@ -1,3 +1,4 @@
+// src/io/mod.rs
 //! I/O subsystem — the MACE ASIC.
 //!
 //! MACE (the I/O Engine) provides:

@@ -1,3 +1,4 @@
+// src/cpu/r5000.rs
 //! MIPS R5000 interpreter core.
 //!
 //! A single-issue, in-order interpreter for the MIPS IV ISA subset used by the

@@ -1,3 +1,4 @@
+// src/memory/mod.rs
 //! Memory subsystem: address space abstraction and physical memory.
 //!
 //! The O2 uses a Unified Memory Architecture (UMA) — CPU, graphics, and I/O

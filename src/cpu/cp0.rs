@@ -1,3 +1,4 @@
+// src/cpu/cp0.rs
 //! CP0 — the MIPS system control coprocessor.
 //!
 //! CP0 holds the processor status, cause, exception program counter, TLB, and

@@ -1,3 +1,4 @@
+// src/memory/physical.rs
 //! Physical memory backing store.
 //!
 //! A simple byte-addressable RAM region with big-endian word access, matching

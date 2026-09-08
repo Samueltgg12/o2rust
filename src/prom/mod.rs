@@ -1,3 +1,4 @@
+// src/prom/mod.rs
 //! IP32 PROM firmware loading.
 //!
 //! The PROM image is a raw MIPS firmware blob organized into **5 sections**

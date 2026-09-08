@@ -1,3 +1,4 @@
+// src/cpu/mod.rs
 //! MIPS CPU emulation.
 //!
 //! Phase 2 milestone M2 targets the **MIPS R5000** core (integer, FPU,

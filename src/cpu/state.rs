@@ -1,3 +1,4 @@
+// src/cpu/state.rs
 //! Shared CPU state: general-purpose registers, FPU registers, and the
 //! program counter / HI-LO special registers.
 

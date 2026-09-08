@@ -1,3 +1,4 @@
+// src/log/mod.rs
 //! Logging and tracing infrastructure.
 //!
 //! The emulator uses the [`tracing`] crate for structured, level-filtered

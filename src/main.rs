@@ -1,3 +1,4 @@
+// src/main.rs
 //! O2Rust — SGI O2 (IP32) emulator.
 //!
 //! This binary is a thin wrapper around the `o2rust` core library. The

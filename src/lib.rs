@@ -1,3 +1,4 @@
+// src/lib.rs
 //! # O2Rust
 //!
 //! An accurate & fast emulator for the SGI O2 (IP32 / "Moosehead") workstation.

@@ -1,3 +1,4 @@
+// src/graphics/mod.rs
 //! Graphics subsystem — the CRM chipset.
 //!
 //! The O2 graphics pipeline consists of four ASICs:
