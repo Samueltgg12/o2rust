@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=O2Rust
+Comment=An Accurate & Fast SGI O2 Emulator.
+Exec=o2rust-gui
+Icon=o2rust-gui
+Categories=Game;Emulator;
+Terminal=false
+StartupNotify=false

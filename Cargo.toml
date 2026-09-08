@@ -2,5 +2,6 @@
 name = "o2rust"
 version = "0.1.0"
 edition = "2024"
-
+description = "An Accurate & Fast SGI O2 Emulator."
+license = "BSD-3-Clause"
 [dependencies]
