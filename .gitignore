@@ -1,1 +1,6 @@
 /target
+samples/linux
+samples/netbsd
+samples/irixsrc
+build/
+build-asan/

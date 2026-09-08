@@ -1,0 +1,59 @@
+/* Trailing data after all sections */
+/* Offset: 0x69600, Length: 92672 bytes */
+
+.set noreorder
+.set noat
+
+	.fill	22720, 4, 0xffffffff
+	.int	0x00ffffff
+	.int	0xffffffff
+	.int	0x00ffffff
+	.fill	5, 4, 0xffffffff
+	.int	0x00ffffff
+	.int	0xffffffff
+	.int	0x00ffffff
+	.int	0xffffffff
+	.int	0xffffffff
+	.int	0xffffffff
+	.int	0x00ffffff
+	.int	0xffffffff
+	.int	0x03ffffff
+	.int	0xffffffff
+	.int	0x00ffffff
+	.int	0xffffffff
+	.int	0xffffffff
+	.int	0xffffffff
+	.int	0x00ffffff
+	.int	0xffffffff
+	.int	0x00ffffff
+	.int	0xffffffff
+	.int	0x00ffffff
+	.int	0xffffffff
+	.int	0xffffffff
+	.int	0xffffffff
+	.int	0x00ffffff
+	.int	0xffffffff
+	.int	0x00ffffff
+	.int	0xffffffff
+	.int	0x00ffffff
+	.fill	5, 4, 0xffffffff
+	.int	0x00ffffff
+	.int	0xffffffff
+	.int	0x00ffffff
+	.fill	5, 4, 0xffffffff
+	.int	0x00ffffff
+	.int	0xffffffff
+	.int	0x00ffffff
+	.int	0xffffffff
+	.int	0x00ffffff
+	.int	0xffffffff
+	.int	0x00ffffff
+	.int	0xffffffff
+	.int	0x00ffffff
+	.int	0xffffffff
+	.int	0x00ffffff
+	.int	0xffffffff
+	.int	0x00ffffff
+	.int	0xffffffff
+	.int	0x00ffffff
+	.fill	385, 4, 0xffffffff
