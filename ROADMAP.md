@@ -66,7 +66,7 @@ checked.
 documentation and specs allow. **This is the core implementation phase.**
 
 ### 2.1 Core infrastructure
-- [ ] Project scaffolding (CMake, C++20, cross-platform build)
+- [ ] Project scaffolding (cargo, Rust, cross-platform build)
 - [ ] Memory map / address space abstraction
 - [ ] Logging, tracing, and debug infrastructure
 - [ ] Test harness (unit + integration)
@@ -116,7 +116,7 @@ prompt with accurate hardware behavior.
 
 ---
 
-## Phase 3 — Performance & polish (current)
+## Phase 3 — Performance & polish (After Phase 2.)
 
 **Goal:** make the emulator fast, polished, and cross-platform.
 

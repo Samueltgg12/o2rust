@@ -5,12 +5,12 @@ The "docs" (this folder), "samples" and other folder/md files come from the O2Em
 
 # SGI O2 Emulator — Hardware Documentation
 
-**Phase 1 (Research) and Phase 2 (Emulation) are complete.** Every hardware
-subsystem has a sourced register map, and the full C++ emulator is
-implemented. These docs are the authoritative reference for the emulator.
+**Phase 1 (Research) is complete.** Every hardware
+subsystem has a sourced register map, and the full Rust emulator is
+the current task. These docs are the authoritative reference for the emulator.
 
-See [ROADMAP.md](../ROADMAP.md) for the full project plan (Phase 3 =
-JIT/optimizations/GUI polish/cross-platform).
+See [ROADMAP.md](../ROADMAP.md) for the full project plan (Phase 2 =
+Emulation, Core Library, cli interface, EGUI-powered GUI.).
 
 ## Machine Overview
 

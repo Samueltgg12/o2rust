@@ -21,7 +21,7 @@ We are currently in **Phase 2 (The Emulation.)**.
   documentation under `docs/`. All register maps sourced.
 - **Phase 2 — Emulation (current):** a full-fledged **Rust** emulator, as
   accurate to the hardware as the documentation and specs allow. CPU, memory,
-  graphics, I/O, and the PROM firmware, with a GUI.
+  graphics, I/O, and the PROM firmware, with a GUI powered by the rust EGUI immediate-mode GUI Project.
 - **Phase 3 — Performance & polish (After Phase 2):** JIT compilation, optimizations,
   GUI improvements, cross-platform support, and full-featured emulator features.
 

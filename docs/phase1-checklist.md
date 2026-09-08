@@ -53,4 +53,4 @@ in this phase.
 - [x] Update `ROADMAP.md` to mark Phase 1 complete
 - [x] Define Phase 2 emulator scope and first boot milestone (see
       `ROADMAP.md` Phase 2)
-- [ ] Create the C++/CMake project only after the research baseline is frozen
+- [ ] Create the Rust project only after the research baseline is frozen
