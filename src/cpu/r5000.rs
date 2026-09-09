@@ -606,29 +606,67 @@ impl R5000 {
 
         match rt {
             0x00 => {
-                // BLTZ
+                // BLTZ - Branch on Less Than Zero
                 if (self.state.gpr(rs) as i64) < 0 {
                     self.branch_offset(imm);
                 }
             }
             0x01 => {
-                // BGEZ
+                // BGEZ - Branch on Greater Than or Equal Zero
                 if (self.state.gpr(rs) as i64) >= 0 {
                     self.branch_offset(imm);
                 }
             }
+            0x02 => {
+                // BLTZL - Branch on Less Than Zero Likely
+                if (self.state.gpr(rs) as i64) < 0 {
+                    self.branch_offset(imm);
+                } else {
+                    // Skip delay slot
+                    self.state.pc = self.state.pc.wrapping_add(4);
+                }
+            }
+            0x03 => {
+                // BGEZL - Branch on Greater Than or Equal Zero Likely
+                if (self.state.gpr(rs) as i64) >= 0 {
+                    self.branch_offset(imm);
+                } else {
+                    // Skip delay slot
+                    self.state.pc = self.state.pc.wrapping_add(4);
+                }
+            }
             0x10 => {
-                // BLTZAL
+                // BLTZAL - Branch on Less Than Zero And Link
                 self.state.set_gpr(31, self.state.pc.wrapping_add(8) as u64);
                 if (self.state.gpr(rs) as i64) < 0 {
                     self.branch_offset(imm);
                 }
             }
             0x11 => {
-                // BGEZAL
+                // BGEZAL - Branch on Greater Than or Equal Zero And Link
                 self.state.set_gpr(31, self.state.pc.wrapping_add(8) as u64);
                 if (self.state.gpr(rs) as i64) >= 0 {
                     self.branch_offset(imm);
+                }
+            }
+            0x12 => {
+                // BLTZALL - Branch on Less Than Zero And Link Likely
+                self.state.set_gpr(31, self.state.pc.wrapping_add(8) as u64);
+                if (self.state.gpr(rs) as i64) < 0 {
+                    self.branch_offset(imm);
+                } else {
+                    // Skip delay slot
+                    self.state.pc = self.state.pc.wrapping_add(4);
+                }
+            }
+            0x13 => {
+                // BGEZALL - Branch on Greater Than or Equal Zero And Link Likely
+                self.state.set_gpr(31, self.state.pc.wrapping_add(8) as u64);
+                if (self.state.gpr(rs) as i64) >= 0 {
+                    self.branch_offset(imm);
+                } else {
+                    // Skip delay slot
+                    self.state.pc = self.state.pc.wrapping_add(4);
                 }
             }
             _ => {
@@ -1001,12 +1039,22 @@ impl R5000 {
 
         match rs {
             0x00 => {
-                // MFC0
+                // MFC0 - Move From Coprocessor 0
+                let v = self.cp0.read(reg_from_index(rd));
+                self.state.set_gpr(rt, v as u64);
+            }
+            0x02 => {
+                // CFC0 - Move Control From Coprocessor 0 (same as MFC0 for R5000)
                 let v = self.cp0.read(reg_from_index(rd));
                 self.state.set_gpr(rt, v as u64);
             }
             0x04 => {
-                // MTC0
+                // MTC0 - Move To Coprocessor 0
+                let v = self.state.gpr(rt) as u32;
+                self.cp0.write(reg_from_index(rd), v);
+            }
+            0x06 => {
+                // CTC0 - Move Control To Coprocessor 0 (same as MTC0 for R5000)
                 let v = self.state.gpr(rt) as u32;
                 self.cp0.write(reg_from_index(rd), v);
             }
@@ -1014,10 +1062,30 @@ impl R5000 {
                 // COP0 function
                 let funct = instr & 0x3f;
                 match funct {
+                    0x01 => {
+                        // TLBR - TLB Read
+                        self.cp0.tlbr();
+                    }
+                    0x02 => {
+                        // TLBWI - TLB Write Index
+                        self.cp0.tlbwi();
+                    }
+                    0x06 => {
+                        // TLBWR - TLB Write Random
+                        self.cp0.tlbwr();
+                    }
+                    0x08 => {
+                        // TLBP - TLB Probe
+                        self.cp0.tlbp();
+                    }
                     0x18 => {
-                        // ERET
+                        // ERET - Exception Return
                         let target = self.cp0.eret();
                         self.state.next_pc = target;
+                    }
+                    0x20 => {
+                        // WAIT - Wait for interrupt (R5000)
+                        // In emulator, just continue
                     }
                     _ => {
                         log::warn_msg(&format!(
@@ -1111,6 +1179,14 @@ impl R5000 {
             0x15 => {
                 // Long fixed point (L)
                 self.fpu_l(instr, ft, fs, fd, funct);
+            }
+            0x18 => {
+                // PS - Paired Single (not implemented, treat as reserved)
+                log::warn_msg(&format!(
+                    "Paired Single FPU fmt not implemented at PC 0x{:08x}",
+                    self.state.pc
+                ));
+                self.exception(ExceptionCode::ReservedInstr);
             }
             _ => {
                 log::warn_msg(&format!(
