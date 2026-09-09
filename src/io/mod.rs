@@ -306,7 +306,7 @@ impl Mace {
     }
 
     /// Read a 32-bit register from MACE.
-    pub fn read32(&self, offset: u32) -> u32 {
+    pub fn read32(&mut self, offset: u32) -> u32 {
         match offset {
             // PCI
             offset if offset >= pci::BASE && offset <= pci::BASE + 0xFF => self.pci.read32(offset - pci::BASE),
@@ -324,6 +324,30 @@ impl Mace {
             offset if offset >= vout::BASE && offset <= vout::BASE + 0xFF => self.vout.read32(offset - vout::BASE),
             _ => {
                 log::warn!("MACE read32: unimplemented offset 0x{:08X}", offset);
+                0
+            }
+        }
+    }
+
+    /// Read a 32-bit register from MACE (immutable version for read-only access).
+    pub fn read32_immutable(&self, offset: u32) -> u32 {
+        match offset {
+            // PCI
+            offset if offset >= pci::BASE && offset <= pci::BASE + 0xFF => self.pci.read32(offset - pci::BASE),
+            // Ethernet
+            offset if offset >= enet::BASE && offset <= enet::BASE + 0x1FF => self.enet.read32(offset - enet::BASE),
+            // Peripheral
+            offset if offset >= perif::BASE && offset <= perif::BASE + 0x4FFFF => self.perif.read32(offset - perif::BASE),
+            // ISA External
+            offset if offset >= isa_ext::BASE && offset <= isa_ext::BASE + 0x3FFFF => self.isa_ext.read32(offset - isa_ext::BASE),
+            // Video In 1
+            offset if offset >= vin1::BASE && offset <= vin1::BASE + 0xFF => self.vin1.read32(offset - vin1::BASE),
+            // Video In 2
+            offset if offset >= vin2::BASE && offset <= vin2::BASE + 0xFF => self.vin2.read32(offset - vin2::BASE),
+            // Video Out
+            offset if offset >= vout::BASE && offset <= vout::BASE + 0xFF => self.vout.read32(offset - vout::BASE),
+            _ => {
+                log::warn!("MACE read32_immutable: unimplemented offset 0x{:08X}", offset);
                 0
             }
         }
@@ -1084,7 +1108,7 @@ impl Io {
     /// Read a 32-bit value from MACE address space.
     pub fn read32(&self, addr: u32) -> u32 {
         if addr >= MACE_BASE && addr < MACE_BASE + 0x400000 {
-            self.mace.read32(addr - MACE_BASE)
+            self.mace.read32_immutable(addr - MACE_BASE)
         } else {
             log::warn!("Io read32: address 0x{:08X} outside MACE range", addr);
             0
