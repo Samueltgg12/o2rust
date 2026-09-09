@@ -21,12 +21,16 @@ pub trait MemoryAccess {
     fn read16(&mut self, addr: u32) -> u16;
     /// Read a byte.
     fn read8(&mut self, addr: u32) -> u8;
+    /// Read a 64-bit doubleword (big-endian).
+    fn read64(&mut self, addr: u32) -> u64;
     /// Write a 32-bit word (big-endian).
     fn write32(&mut self, addr: u32, value: u32);
     /// Write a 16-bit halfword (big-endian).
     fn write16(&mut self, addr: u32, value: u16);
     /// Write a byte.
     fn write8(&mut self, addr: u32, value: u8);
+    /// Write a 64-bit doubleword (big-endian).
+    fn write64(&mut self, addr: u32, value: u64);
 }
 
 /// The MIPS R5000 CPU core.
