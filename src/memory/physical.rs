@@ -108,6 +108,47 @@ impl AddressSpace for PhysicalMemory {
         }
     }
 
+    fn read64(&mut self, addr: u32) -> u64 {
+        let a = addr as usize;
+        let b0 = self.data.get(a).copied().unwrap_or(0) as u64;
+        let b1 = self.data.get(a + 1).copied().unwrap_or(0) as u64;
+        let b2 = self.data.get(a + 2).copied().unwrap_or(0) as u64;
+        let b3 = self.data.get(a + 3).copied().unwrap_or(0) as u64;
+        let b4 = self.data.get(a + 4).copied().unwrap_or(0) as u64;
+        let b5 = self.data.get(a + 5).copied().unwrap_or(0) as u64;
+        let b6 = self.data.get(a + 6).copied().unwrap_or(0) as u64;
+        let b7 = self.data.get(a + 7).copied().unwrap_or(0) as u64;
+        (b0 << 56) | (b1 << 48) | (b2 << 40) | (b3 << 32) | (b4 << 24) | (b5 << 16) | (b6 << 8) | b7
+    }
+
+    fn write64(&mut self, addr: u32, value: u64) {
+        let a = addr as usize;
+        if let Some(byte) = self.data.get_mut(a) {
+            *byte = (value >> 56) as u8;
+        }
+        if let Some(byte) = self.data.get_mut(a + 1) {
+            *byte = (value >> 48) as u8;
+        }
+        if let Some(byte) = self.data.get_mut(a + 2) {
+            *byte = (value >> 40) as u8;
+        }
+        if let Some(byte) = self.data.get_mut(a + 3) {
+            *byte = (value >> 32) as u8;
+        }
+        if let Some(byte) = self.data.get_mut(a + 4) {
+            *byte = (value >> 24) as u8;
+        }
+        if let Some(byte) = self.data.get_mut(a + 5) {
+            *byte = (value >> 16) as u8;
+        }
+        if let Some(byte) = self.data.get_mut(a + 6) {
+            *byte = (value >> 8) as u8;
+        }
+        if let Some(byte) = self.data.get_mut(a + 7) {
+            *byte = value as u8;
+        }
+    }
+
     fn contains(&self, addr: u32) -> bool {
         (addr as usize) < self.data.len()
     }

@@ -36,4 +36,12 @@ impl MemoryAccess for SystemBus<'_> {
     fn write8(&mut self, addr: u32, value: u8) {
         self.memory.write8(addr, value);
     }
+
+    fn read64(&mut self, addr: u32) -> u64 {
+        self.memory.read64(addr)
+    }
+
+    fn write64(&mut self, addr: u32, value: u64) {
+        self.memory.write64(addr, value);
+    }
 }

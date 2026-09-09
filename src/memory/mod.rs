@@ -140,4 +140,30 @@ impl MemoryMap {
             a => self.rom.write8(a - ip32::PHYS_SYSTEM_ROM, value),
         }
     }
+
+    /// Read a 64-bit doubleword from the physical address space (big-endian).
+    pub fn read64(&mut self, addr: u32) -> u64 {
+        match addr {
+            a if a < ip32::PHYS_BASE_CRIME => self.ram.read64(a),
+            a if a < ip32::PHYS_BASE_RENDER => self.crime.read64(a - ip32::PHYS_BASE_CRIME),
+            a if a < ip32::PHYS_BASE_GBE => 0,
+            a if a < ip32::PHYS_BASE_MACE => self.gbe.read64(a - ip32::PHYS_BASE_GBE),
+            a if a < ip32::PHYS_SYSTEM_ROM => self.mace.read64(a - ip32::PHYS_BASE_MACE),
+            a => self.rom.read64(a - ip32::PHYS_SYSTEM_ROM),
+        }
+    }
+
+    /// Write a 64-bit doubleword to the physical address space (big-endian).
+    pub fn write64(&mut self, addr: u32, value: u64) {
+        match addr {
+            a if a < ip32::PHYS_BASE_CRIME => self.ram.write64(a, value),
+            a if a < ip32::PHYS_BASE_RENDER => {
+                self.crime.write64(a - ip32::PHYS_BASE_CRIME, value)
+            }
+            a if a < ip32::PHYS_BASE_GBE => {}
+            a if a < ip32::PHYS_BASE_MACE => self.gbe.write64(a - ip32::PHYS_BASE_GBE, value),
+            a if a < ip32::PHYS_SYSTEM_ROM => self.mace.write64(a - ip32::PHYS_BASE_MACE, value),
+            a => self.rom.write64(a - ip32::PHYS_SYSTEM_ROM, value),
+        }
+    }
 }
