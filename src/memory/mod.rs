@@ -21,6 +21,10 @@ pub trait AddressSpace {
     fn read16(&mut self, addr: u32) -> u16;
     /// Read a 32-bit word at `addr` (big-endian).
     fn read32(&mut self, addr: u32) -> u32;
+    /// Read a 64-bit doubleword at `addr` (big-endian).
+    fn read64(&mut self, addr: u32) -> u64 {
+        ((self.read32(addr) as u64) << 32) | (self.read32(addr.wrapping_add(4)) as u64)
+    }
 
     /// Write a single byte to `addr`.
     fn write8(&mut self, addr: u32, value: u8);
@@ -28,6 +32,11 @@ pub trait AddressSpace {
     fn write16(&mut self, addr: u32, value: u16);
     /// Write a 32-bit word to `addr` (big-endian).
     fn write32(&mut self, addr: u32, value: u32);
+    /// Write a 64-bit doubleword to `addr` (big-endian).
+    fn write64(&mut self, addr: u32, value: u64) {
+        self.write32(addr, (value >> 32) as u32);
+        self.write32(addr.wrapping_add(4), value as u32);
+    }
 
     /// Whether this region contains `addr`.
     fn contains(&self, addr: u32) -> bool;
