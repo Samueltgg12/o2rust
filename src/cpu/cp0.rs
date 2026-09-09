@@ -99,10 +99,33 @@ pub enum ExceptionCode {
     Fpe = 15,
 }
 
+/// A single TLB entry (48 entries on R5000).
+///
+/// Each TLB entry maps two pages (even/odd) and consists of:
+/// - EntryHi: VPN2 (bits 31..13), ASID (bits 7..0)
+/// - EntryLo0: PFN (bits 29..6), C (bits 5..3), D (bit 2), V (bit 1), G (bit 0) — even page
+/// - EntryLo1: PFN (bits 29..6), C (bits 5..3), D (bit 2), V (bit 1), G (bit 0) — odd page
+/// - PageMask: Mask (bits 28..13) — page size
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TlbEntry {
+    pub entry_hi: u32,
+    pub entry_lo0: u32,
+    pub entry_lo1: u32,
+    pub page_mask: u32,
+}
+
 /// The CP0 coprocessor state.
 #[derive(Debug, Clone)]
 pub struct Cp0 {
     regs: [u32; 32],
+    /// TLB entries (48 for R5000).
+    tlb: [TlbEntry; 48],
+    /// Index register (CP0 register 0) - index into TLB for TLBR/TLBWI.
+    index: u32,
+    /// Random register (CP0 register 1) - random index for TLBWR.
+    random: u32,
+    /// Wired register (CP0 register 6) - number of wired TLB entries.
+    wired: u32,
 }
 
 impl Default for Cp0 {
@@ -114,7 +137,13 @@ impl Default for Cp0 {
 impl Cp0 {
     /// Create a new CP0 with power-on reset values.
     pub fn new() -> Self {
-        let mut cp0 = Self { regs: [0; 32] };
+        let mut cp0 = Self {
+            regs: [0; 32],
+            tlb: [TlbEntry::default(); 48],
+            index: 0,
+            random: 31,
+            wired: 0,
+        };
         cp0.reset();
         cp0
     }
@@ -122,12 +151,17 @@ impl Cp0 {
     /// Reset CP0 to power-on values.
     pub fn reset(&mut self) {
         self.regs = [0; 32];
-        self.regs[Cp0Reg::Random as usize] = 31;
+        self.tlb = [TlbEntry::default(); 48];
+        self.index = 0;
+        self.random = 31;
+        self.wired = 0;
         // BEV=1, TS=1, SR=0, NMI=0 — matches the O2Emu reference and the
         // MIPS reset state (boot exception vectors enabled).
         self.regs[Cp0Reg::Status as usize] = 0x0040_0004;
         // R5000 PRID: implementation 0x23 (R5000), revision 0.
         self.regs[Cp0Reg::PrId as usize] = 0x0000_2300;
+        // Config register: K0=3 (cacheable), KU=0, K23=0
+        self.regs[Cp0Reg::Config as usize] = 0x0006_E463;
     }
 
     /// Read a CP0 register.
