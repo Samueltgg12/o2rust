@@ -437,20 +437,135 @@ impl R5000 {
                 let v = (self.state.gpr(rs) < self.state.gpr(rt)) as u64;
                 self.state.set_gpr(rd, v);
             }
-            0x2c..=0x32 => {
-                // TGE/TGEU/TLT/TLTU/TEQ/TNE — trap if condition holds
-                let trap = match funct {
-                    0x2c => self.state.gpr(rs) as i64 >= self.state.gpr(rt) as i64,
-                    0x2d => self.state.gpr(rs) >= self.state.gpr(rt),
-                    0x2e => (self.state.gpr(rs) as i64) < (self.state.gpr(rt) as i64),
-                    0x2f => self.state.gpr(rs) < self.state.gpr(rt),
-                    0x30 => self.state.gpr(rs) == self.state.gpr(rt),
-                    0x32 => self.state.gpr(rs) != self.state.gpr(rt),
-                    _ => false,
-                };
-                if trap {
+            0x0a => {
+                // MOVZ (MIPS IV) - Move if Zero
+                if self.state.gpr(rt) == 0 {
+                    self.state.set_gpr(rd, self.state.gpr(rs));
+                }
+            }
+            0x0b => {
+                // MOVN (MIPS IV) - Move if Not Zero
+                if self.state.gpr(rt) != 0 {
+                    self.state.set_gpr(rd, self.state.gpr(rs));
+                }
+            }
+            0x14 => {
+                // DSLLV (MIPS III) - Doubleword Shift Left Logical Variable
+                let s = (self.state.gpr(rs) & 0x3f) as u32;
+                let v = self.state.gpr(rt) << s;
+                self.state.set_gpr(rd, v);
+            }
+            0x1c => {
+                // MADD (MIPS IV) - Multiply-Add
+                let a = self.state.gpr(rs) as i64;
+                let b = self.state.gpr(rt) as i64;
+                let result = a.wrapping_mul(b);
+                let (new_lo, new_hi) = self.madd_maddu(result);
+                self.state.lo = new_lo;
+                self.state.hi = new_hi;
+            }
+            0x1d => {
+                // MADDU (MIPS IV) - Multiply-Add Unsigned
+                let a = self.state.gpr(rs) as u64;
+                let b = self.state.gpr(rt) as u64;
+                let result = a.wrapping_mul(b);
+                let (new_lo, new_hi) = self.madd_maddu(result as i64);
+                self.state.lo = new_lo;
+                self.state.hi = new_hi;
+            }
+            0x28 => {
+                // MFSA (MIPS IV) - Move from SA (Shift Amount register)
+                // SA register is typically the shift amount from previous shift instruction
+                // For now, we'll use a dedicated field or derive from context
+                // In MIPS IV, SA is a special register; we'll store it in the CPU state
+                self.state.set_gpr(rd, self.state.sa);
+            }
+            0x29 => {
+                // MTSA (MIPS IV) - Move to SA (Shift Amount register)
+                self.state.sa = self.state.gpr(rs) & 0x3f;
+            }
+            0x2c => {
+                // DADD (MIPS III) - Doubleword Add (signed, traps on overflow)
+                let a = self.state.gpr(rs) as i64;
+                let b = self.state.gpr(rt) as i64;
+                let (result, overflow) = a.overflowing_add(b);
+                if overflow {
+                    self.exception(ExceptionCode::Ovf);
+                } else {
+                    self.state.set_gpr(rd, result as u64);
+                }
+            }
+            0x2d => {
+                // DADDU (MIPS III) - Doubleword Add Unsigned
+                let v = self.state.gpr(rs).wrapping_add(self.state.gpr(rt));
+                self.state.set_gpr(rd, v);
+            }
+            0x2e => {
+                // DSUB (MIPS III) - Doubleword Subtract (signed, traps on overflow)
+                let a = self.state.gpr(rs) as i64;
+                let b = self.state.gpr(rt) as i64;
+                let (result, overflow) = a.overflowing_sub(b);
+                if overflow {
+                    self.exception(ExceptionCode::Ovf);
+                } else {
+                    self.state.set_gpr(rd, result as u64);
+                }
+            }
+            0x2f => {
+                // DSUBU (MIPS III) - Doubleword Subtract Unsigned
+                let v = self.state.gpr(rs).wrapping_sub(self.state.gpr(rt));
+                self.state.set_gpr(rd, v);
+            }
+            0x30 => {
+                // TGE (MIPS II+) - Trap if Greater or Equal (signed)
+                if (self.state.gpr(rs) as i64) >= (self.state.gpr(rt) as i64) {
                     self.exception(ExceptionCode::Trap);
                 }
+            }
+            0x31 => {
+                // TGEU (MIPS II+) - Trap if Greater or Equal (unsigned)
+                if self.state.gpr(rs) >= self.state.gpr(rt) {
+                    self.exception(ExceptionCode::Trap);
+                }
+            }
+            0x32 => {
+                // TLT (MIPS II+) - Trap if Less Than (signed)
+                if (self.state.gpr(rs) as i64) < (self.state.gpr(rt) as i64) {
+                    self.exception(ExceptionCode::Trap);
+                }
+            }
+            0x33 => {
+                // TLTU (MIPS II+) - Trap if Less Than (unsigned)
+                if self.state.gpr(rs) < self.state.gpr(rt) {
+                    self.exception(ExceptionCode::Trap);
+                }
+            }
+            0x34 => {
+                // TEQ (MIPS II+) - Trap if Equal
+                if self.state.gpr(rs) == self.state.gpr(rt) {
+                    self.exception(ExceptionCode::Trap);
+                }
+            }
+            0x36 => {
+                // TNE (MIPS II+) - Trap if Not Equal
+                if self.state.gpr(rs) != self.state.gpr(rt) {
+                    self.exception(ExceptionCode::Trap);
+                }
+            }
+            0x38 => {
+                // DSLL (MIPS III) - Doubleword Shift Left Logical
+                let v = self.state.gpr(rt) << shamt;
+                self.state.set_gpr(rd, v);
+            }
+            0x3a => {
+                // DSRL (MIPS III) - Doubleword Shift Right Logical
+                let v = self.state.gpr(rt) >> shamt;
+                self.state.set_gpr(rd, v);
+            }
+            0x3b => {
+                // DSRA (MIPS III) - Doubleword Shift Right Arithmetic
+                let v = ((self.state.gpr(rt) as i64) >> shamt) as u64;
+                self.state.set_gpr(rd, v);
             }
             0x3c => {
                 // DSLL32 - Doubleword Shift Left Logical + 32 (MIPS IV)
