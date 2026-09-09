@@ -1232,8 +1232,10 @@ impl R5000 {
             0x08 => {
                 // BC1 - Branch on FPU Condition (MIPS IV)
                 // nd[4:1] = condition code, nd[0] = tf (true/false)
+                // bit 16 = likely (branch likely)
                 let cc = (nd >> 1) & 0x7; // condition code (0-7)
                 let tf = nd & 1; // true/false
+                let likely = (instr >> 16) & 1 != 0; // likely bit
                 let imm = (instr & 0xffff) as i16 as i32;
                 
                 // Get condition bit from FCR31
@@ -1242,6 +1244,9 @@ impl R5000 {
                 
                 if take_branch {
                     self.branch_offset(imm);
+                } else if likely {
+                    // Branch likely not taken: nullify the delay slot instruction
+                    self.state.nullify_delay_slot = true;
                 }
             }
             0x10..=0x1f => {
