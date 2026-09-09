@@ -152,22 +152,35 @@ impl R5000 {
             0x0f => self.lui(instr),
             0x10 => self.cop0(instr),
             0x11 => self.cop1(instr),
+            0x18 => self.daddi(instr, true),   // DADDI - Doubleword Add Immediate
+            0x19 => self.daddi(instr, false),  // DADDIU - Doubleword Add Immediate Unsigned
+            0x1a => self.load_left(instr, mem, 8),  // LDL - Load Doubleword Left
+            0x1b => self.load_right(instr, mem, 8), // LDR - Load Doubleword Right
+            0x1e => self.load_quad(instr, mem),     // LQ - Load Quadword (MIPS IV)
+            0x1f => self.store_quad(instr, mem),    // SQ - Store Quadword (MIPS IV)
             0x20 => self.load(instr, mem, 1, true),
             0x21 => self.load(instr, mem, 2, true),
-            0x22 => self.load_left(instr, mem),
+            0x22 => self.load_left(instr, mem, 4),
             0x23 => self.load(instr, mem, 4, true),
             0x24 => self.load(instr, mem, 1, false),
             0x25 => self.load(instr, mem, 2, false),
-            0x26 => self.load_right(instr, mem),
+            0x26 => self.load_right(instr, mem, 4),
+            0x27 => self.load(instr, mem, 4, false), // LWU - Load Word Unsigned
             0x28 => self.store(instr, mem, 1),
             0x29 => self.store(instr, mem, 2),
-            0x2a => self.store_left(instr, mem),
+            0x2a => self.store_left(instr, mem, 4),
             0x2b => self.store(instr, mem, 4),
-            0x2e => self.store_right(instr, mem),
+            0x2c => self.store_left(instr, mem, 8),  // SDL - Store Doubleword Left
+            0x2d => self.store_right(instr, mem, 8), // SDR - Store Doubleword Right
+            0x2e => self.store_right(instr, mem, 4),
             0x2f => self.execute_cache(instr, mem),
             0x30 => self.load(instr, mem, 4, true), // LL (simplified)
+            0x34 => self.load(instr, mem, 8, true), // LLD - Load Linked Doubleword
+            0x35 => self.load_fp(instr, mem),       // LDC1 - Load Doubleword to Coprocessor 1
             0x37 => self.load(instr, mem, 8, true), // LD (Load Doubleword, 64-bit)
             0x38 => self.store(instr, mem, 4),      // SC (simplified)
+            0x3c => self.store(instr, mem, 8),      // SCD - Store Conditional Doubleword
+            0x3d => self.store_fp(instr, mem),      // SDC1 - Store Doubleword from Coprocessor 1
             0x3f => self.store(instr, mem, 8),      // SD (Store Doubleword, 64-bit)
             0x31 => self.load_fp(instr, mem),
             0x39 => self.store_fp(instr, mem),
@@ -627,30 +640,72 @@ impl R5000 {
         self.state.set_gpr(rt, value);
     }
 
-    fn load_left(&mut self, instr: u32, mem: &mut dyn MemoryAccess) {
+    fn load_left(&mut self, instr: u32, mem: &mut dyn MemoryAccess, size: u32) {
         let rs = ((instr >> 21) & 0x1f) as usize;
         let rt = ((instr >> 16) & 0x1f) as usize;
         let imm = (instr & 0xffff) as i16 as i32;
         let addr = self.state.gpr(rs).wrapping_add(imm as u64) as u32;
-        let aligned = addr & !3;
-        let word = mem.read32(aligned) as u64;
-        let shift = (addr & 3) * 8;
-        let mask = 0xffff_ffff_ffff_ffffu64 << (32 - shift);
-        let merged = (self.state.gpr(rt) & !mask) | (word & mask);
-        self.state.set_gpr(rt, merged);
+        
+        match size {
+            4 => {
+                let aligned = addr & !3;
+                let word = mem.read32(aligned) as u64;
+                let shift = (addr & 3) * 8;
+                let mask = 0xffff_ffff_ffff_ffffu64 << (32 - shift);
+                let merged = (self.state.gpr(rt) & !mask) | (word & mask);
+                self.state.set_gpr(rt, merged);
+            }
+            8 => {
+                let aligned = addr & !7;
+                let dword = mem.read64(aligned);
+                let shift = (addr & 7) * 8;
+                let mask = 0xffff_ffff_ffff_ffffu64 << (64 - shift);
+                let merged = (self.state.gpr(rt) & !mask) | (dword & mask);
+                self.state.set_gpr(rt, merged);
+            }
+            _ => {
+                let aligned = addr & !3;
+                let word = mem.read32(aligned) as u64;
+                let shift = (addr & 3) * 8;
+                let mask = 0xffff_ffff_ffff_ffffu64 << (32 - shift);
+                let merged = (self.state.gpr(rt) & !mask) | (word & mask);
+                self.state.set_gpr(rt, merged);
+            }
+        }
     }
 
-    fn load_right(&mut self, instr: u32, mem: &mut dyn MemoryAccess) {
+    fn load_right(&mut self, instr: u32, mem: &mut dyn MemoryAccess, size: u32) {
         let rs = ((instr >> 21) & 0x1f) as usize;
         let rt = ((instr >> 16) & 0x1f) as usize;
         let imm = (instr & 0xffff) as i16 as i32;
         let addr = self.state.gpr(rs).wrapping_add(imm as u64) as u32;
-        let aligned = addr & !3;
-        let word = mem.read32(aligned) as u64;
-        let shift = (3 - (addr & 3)) * 8;
-        let mask = 0xffff_ffff_ffff_ffffu64 >> (32 - shift);
-        let merged = (self.state.gpr(rt) & !mask) | (word & mask);
-        self.state.set_gpr(rt, merged);
+        
+        match size {
+            4 => {
+                let aligned = addr & !3;
+                let word = mem.read32(aligned) as u64;
+                let shift = (3 - (addr & 3)) * 8;
+                let mask = 0xffff_ffff_ffff_ffffu64 >> (32 - shift);
+                let merged = (self.state.gpr(rt) & !mask) | (word & mask);
+                self.state.set_gpr(rt, merged);
+            }
+            8 => {
+                let aligned = addr & !7;
+                let dword = mem.read64(aligned);
+                let shift = (7 - (addr & 7)) * 8;
+                let mask = 0xffff_ffff_ffff_ffffu64 >> (64 - shift);
+                let merged = (self.state.gpr(rt) & !mask) | (dword & mask);
+                self.state.set_gpr(rt, merged);
+            }
+            _ => {
+                let aligned = addr & !3;
+                let word = mem.read32(aligned) as u64;
+                let shift = (3 - (addr & 3)) * 8;
+                let mask = 0xffff_ffff_ffff_ffffu64 >> (32 - shift);
+                let merged = (self.state.gpr(rt) & !mask) | (word & mask);
+                self.state.set_gpr(rt, merged);
+            }
+        }
     }
 
     fn store(&mut self, instr: u32, mem: &mut dyn MemoryAccess, size: u32) {
@@ -669,30 +724,138 @@ impl R5000 {
         }
     }
 
-    fn store_left(&mut self, instr: u32, mem: &mut dyn MemoryAccess) {
+    fn store_left(&mut self, instr: u32, mem: &mut dyn MemoryAccess, size: u32) {
         let rs = ((instr >> 21) & 0x1f) as usize;
         let rt = ((instr >> 16) & 0x1f) as usize;
         let imm = (instr & 0xffff) as i16 as i32;
         let addr = self.state.gpr(rs).wrapping_add(imm as u64) as u32;
-        let aligned = addr & !3;
-        let word = mem.read32(aligned);
-        let shift = (addr & 3) * 8;
-        let mask = 0xffff_ffffu32 << (32 - shift);
-        let merged = (word & !mask) | ((self.state.gpr(rt) as u32) & mask);
-        mem.write32(aligned, merged);
+        
+        match size {
+            4 => {
+                let aligned = addr & !3;
+                let word = mem.read32(aligned);
+                let shift = (addr & 3) * 8;
+                let mask = 0xffff_ffffu32 << (32 - shift);
+                let merged = (word & !mask) | ((self.state.gpr(rt) as u32) & mask);
+                mem.write32(aligned, merged);
+            }
+            8 => {
+                let aligned = addr & !7;
+                let dword = mem.read64(aligned);
+                let shift = (addr & 7) * 8;
+                let mask = 0xffff_ffff_ffff_ffffu64 << (64 - shift);
+                let merged = (dword & !mask) | (self.state.gpr(rt) & mask);
+                mem.write64(aligned, merged);
+            }
+            _ => {
+                let aligned = addr & !3;
+                let word = mem.read32(aligned);
+                let shift = (addr & 3) * 8;
+                let mask = 0xffff_ffffu32 << (32 - shift);
+                let merged = (word & !mask) | ((self.state.gpr(rt) as u32) & mask);
+                mem.write32(aligned, merged);
+            }
+        }
     }
 
-    fn store_right(&mut self, instr: u32, mem: &mut dyn MemoryAccess) {
+    fn store_right(&mut self, instr: u32, mem: &mut dyn MemoryAccess, size: u32) {
         let rs = ((instr >> 21) & 0x1f) as usize;
         let rt = ((instr >> 16) & 0x1f) as usize;
         let imm = (instr & 0xffff) as i16 as i32;
         let addr = self.state.gpr(rs).wrapping_add(imm as u64) as u32;
-        let aligned = addr & !3;
-        let word = mem.read32(aligned);
-        let shift = (3 - (addr & 3)) * 8;
-        let mask = 0xffff_ffffu32 >> (32 - shift);
-        let merged = (word & !mask) | ((self.state.gpr(rt) as u32) & mask);
-        mem.write32(aligned, merged);
+        
+        match size {
+            4 => {
+                let aligned = addr & !3;
+                let word = mem.read32(aligned);
+                let shift = (3 - (addr & 3)) * 8;
+                let mask = 0xffff_ffffu32 >> (32 - shift);
+                let merged = (word & !mask) | ((self.state.gpr(rt) as u32) & mask);
+                mem.write32(aligned, merged);
+            }
+            8 => {
+                let aligned = addr & !7;
+                let dword = mem.read64(aligned);
+                let shift = (7 - (addr & 7)) * 8;
+                let mask = 0xffff_ffff_ffff_ffffu64 >> (64 - shift);
+                let merged = (dword & !mask) | (self.state.gpr(rt) & mask);
+                mem.write64(aligned, merged);
+            }
+            _ => {
+                let aligned = addr & !3;
+                let word = mem.read32(aligned);
+                let shift = (3 - (addr & 3)) * 8;
+                let mask = 0xffff_ffffu32 >> (32 - shift);
+                let merged = (word & !mask) | ((self.state.gpr(rt) as u32) & mask);
+                mem.write32(aligned, merged);
+            }
+        }
+    }
+
+    /// DADDI (0x18) / DADDIU (0x19) - 64-bit add immediate
+    fn daddi(&mut self, instr: u32, is_signed: bool) {
+        let rs = ((instr >> 21) & 0x1f) as usize;
+        let rt = ((instr >> 16) & 0x1f) as usize;
+        let imm = (instr & 0xffff) as i16 as i64;
+        let rs_val = self.state.gpr(rs);
+        
+        if is_signed {
+            // DADDI - signed add with overflow detection
+            let result = rs_val.wrapping_add(imm as u64);
+            // Check for overflow: (rs_val >= 0 && imm >= 0 && result < 0) || (rs_val < 0 && imm < 0 && result >= 0)
+            let rs_sign = (rs_val >> 63) & 1;
+            let imm_sign = (imm >> 63) & 1;
+            let result_sign = (result >> 63) & 1;
+            
+            if rs_sign == imm_sign && rs_sign != result_sign {
+                // Overflow - trigger exception
+                self.state.cp0.cause = (self.state.cp0.cause & !0x7c) | (0x0c << 2); // Ovf exception code
+                self.state.cp0.epc = self.state.pc;
+                self.state.cp0.status = (self.state.cp0.status & !0x3f) | 0x01; // Set EXL bit
+                self.state.pc = 0x80000080; // Exception vector
+                return;
+            }
+            self.state.set_gpr(rt, result);
+        } else {
+            // DADDIU - unsigned add, no overflow
+            self.state.set_gpr(rt, rs_val.wrapping_add(imm as u64));
+        }
+    }
+
+    /// LQ (0x1e) - Load Quadword (128-bit load into register pair rt, rt+1)
+    fn load_quad(&mut self, instr: u32, mem: &mut dyn MemoryAccess) {
+        let rs = ((instr >> 21) & 0x1f) as usize;
+        let rt = ((instr >> 16) & 0x1f) as usize;
+        let imm = (instr & 0xffff) as i16 as i32;
+        let addr = self.state.gpr(rs).wrapping_add(imm as u64) as u32;
+        
+        // LQ loads 128 bits (16 bytes) into rt and rt+1
+        // Must be 16-byte aligned
+        let aligned_addr = addr & !0xf;
+        let low = mem.read64(aligned_addr);
+        let high = mem.read64(aligned_addr + 8);
+        
+        self.state.set_gpr(rt, low);
+        if rt < 31 {
+            self.state.set_gpr(rt + 1, high);
+        }
+    }
+
+    /// SQ (0x1f) - Store Quadword (128-bit store from register pair rt, rt+1)
+    fn store_quad(&mut self, instr: u32, mem: &mut dyn MemoryAccess) {
+        let rs = ((instr >> 21) & 0x1f) as usize;
+        let rt = ((instr >> 16) & 0x1f) as usize;
+        let imm = (instr & 0xffff) as i16 as i32;
+        let addr = self.state.gpr(rs).wrapping_add(imm as u64) as u32;
+        
+        // SQ stores 128 bits (16 bytes) from rt and rt+1
+        // Must be 16-byte aligned
+        let aligned_addr = addr & !0xf;
+        let low = self.state.gpr(rt);
+        let high = if rt < 31 { self.state.gpr(rt + 1) } else { 0 };
+        
+        mem.write64(aligned_addr, low);
+        mem.write64(aligned_addr + 8, high);
     }
 
     fn load_fp(&mut self, instr: u32, mem: &mut dyn MemoryAccess) {
