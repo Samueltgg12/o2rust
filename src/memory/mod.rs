@@ -10,6 +10,7 @@
 
 pub mod physical;
 
+use crate::io::Mace;
 use crate::ip32;
 
 /// A region of the physical address space that can be read from and written
@@ -54,7 +55,7 @@ pub struct MemoryMap {
     /// CRIME CPU interface (MMIO).
     pub crime: physical::PhysicalMemory,
     /// MACE I/O engine (MMIO).
-    pub mace: physical::PhysicalMemory,
+    pub mace: Mace,
     /// GBE display engine (MMIO).
     pub gbe: physical::PhysicalMemory,
 }
@@ -67,7 +68,7 @@ impl MemoryMap {
             ram: physical::PhysicalMemory::new(ram_size as usize),
             rom: physical::PhysicalMemory::new(ip32::SYSTEM_ROM_WINDOW_SIZE as usize),
             crime: physical::PhysicalMemory::new(0x1000),
-            mace: physical::PhysicalMemory::new(0x4000),
+            mace: Mace::new(),
             gbe: physical::PhysicalMemory::new(0x1000),
         }
     }

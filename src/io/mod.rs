@@ -353,6 +353,58 @@ impl Mace {
     }
 }
 
+impl crate::memory::AddressSpace for Mace {
+    fn read8(&mut self, addr: u32) -> u8 {
+        // MACE registers are 32-bit aligned; read the 32-bit word and extract the byte
+        let word = self.read32(addr);
+        ((word >> ((addr & 3) * 8)) & 0xFF) as u8
+    }
+
+    fn read16(&mut self, addr: u32) -> u16 {
+        let word = self.read32(addr);
+        ((word >> ((addr & 3) * 8)) & 0xFFFF) as u16
+    }
+
+    fn read32(&mut self, addr: u32) -> u32 {
+        self.read32(addr)
+    }
+
+    fn read64(&mut self, addr: u32) -> u64 {
+        // MACE doesn't have 64-bit registers; combine two 32-bit reads
+        let low = self.read32(addr) as u64;
+        let high = self.read32(addr.wrapping_add(4)) as u64;
+        (high << 32) | low
+    }
+
+    fn write8(&mut self, addr: u32, value: u8) {
+        // Read-modify-write for byte writes
+        let word = self.read32(addr);
+        let shift = (addr & 3) * 8;
+        let new_word = (word & !(0xFF << shift)) | ((value as u32) << shift);
+        self.write32(addr, new_word);
+    }
+
+    fn write16(&mut self, addr: u32, value: u16) {
+        let word = self.read32(addr);
+        let shift = (addr & 3) * 8;
+        let new_word = (word & !(0xFFFF << shift)) | ((value as u32) << shift);
+        self.write32(addr, new_word);
+    }
+
+    fn write32(&mut self, addr: u32, value: u32) {
+        self.write32(addr, value);
+    }
+
+    fn write64(&mut self, addr: u32, value: u64) {
+        self.write32(addr, value as u32);
+        self.write32(addr.wrapping_add(4), (value >> 32) as u32);
+    }
+
+    fn contains(&self, addr: u32) -> bool {
+        addr < 0x400000 // MACE address space is 4MB (0x1F000000 - 0x1F3FFFFF)
+    }
+}
+
 /// PCI Host Bridge state.
 #[derive(Debug, Default)]
 pub struct PciState {
