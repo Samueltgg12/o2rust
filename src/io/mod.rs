@@ -6,12 +6,14 @@
 //! - 64-bit PCI bus (single expansion slot)
 //! - ISA bus (used only for the Super I/O chip: serial/parallel)
 //! - PS/2 keyboard + mouse
-//! - 10/100 Ethernet
+//! - 10/100 Ethernet (MAC110)
 //! - Audio (AD1843 codec)
 //! - SCSI (Adaptec AIC-7880)
 //!
-//! **Status:** milestone M3 (graphics + I/O functional). This module is a
-//! placeholder; the full MACE emulation is implemented in later milestones.
+//! Register maps sourced from Linux `arch/mips/sgi-ip32/`, NetBSD `sys/arch/sgimips/`,
+//! and leaked IRIX source `stand/arcs/`.
+
+use crate::memory::MemoryAccess;
 
 /// MACE base address (IRIX `mace.h`).
 pub const MACE_BASE: u32 = 0x1f00_0000;
@@ -26,7 +28,7 @@ pub mod offsets {
     pub const VIN2: u32 = 0x180000;
     /// Video Out.
     pub const VOUT: u32 = 0x200000;
-    /// Ethernet.
+    /// Ethernet (MAC110).
     pub const ENET: u32 = 0x280000;
     /// Peripheral (audio, ISA, keyboard/mouse, I2C, UST/MSC).
     pub const PERIF: u32 = 0x300000;
@@ -34,25 +36,1011 @@ pub mod offsets {
     pub const ISA_EXT: u32 = 0x380000;
 }
 
+/// PCI Host Bridge registers (offset 0x080000 from MACE_BASE).
+/// Sourced from Linux `arch/mips/include/asm/ip32/mace.h` and IRIX `mace.h`.
+pub mod pci {
+    pub const BASE: u32 = 0x080000;
+
+    // PCI Configuration Space
+    pub const CFG_ADDR: u32 = 0x0000;  // Configuration address
+    pub const CFG_DATA: u32 = 0x0004;  // Configuration data
+
+    // PCI Memory Space
+    pub const MEM_BASE: u32 = 0x0010;  // Memory base address
+    pub const MEM_LIMIT: u32 = 0x0014; // Memory limit address
+
+    // PCI I/O Space
+    pub const IO_BASE: u32 = 0x0018;   // I/O base address
+    pub const IO_LIMIT: u32 = 0x001C;  // I/O limit address
+
+    // PCI Control/Status
+    pub const CTRL: u32 = 0x0020;      // PCI control register
+    pub const STATUS: u32 = 0x0024;    // PCI status register
+
+    // PCI Interrupt
+    pub const INT_ACK: u32 = 0x0028;   // Interrupt acknowledge
+    pub const INT_MASK: u32 = 0x002C;  // Interrupt mask
+
+    // PCI Arbiter
+    pub const ARB_CTRL: u32 = 0x0030;  // Arbiter control
+    pub const ARB_PRI: u32 = 0x0034;   // Arbiter priority
+
+    // PCI Error
+    pub const ERR_ADDR: u32 = 0x0038;  // Error address
+    pub const ERR_CMD: u32 = 0x003C;   // Error command
+}
+
+/// Ethernet MAC110 registers (offset 0x280000 from MACE_BASE).
+/// Sourced from Linux `drivers/net/ethernet/sgi/mace.c` and IRIX `if_mace.c`.
+pub mod enet {
+    pub const BASE: u32 = 0x280000;
+
+    // MAC110 Control/Status
+    pub const CTRL: u32 = 0x0000;      // Control register
+    pub const STATUS: u32 = 0x0004;    // Status register
+    pub const INT_MASK: u32 = 0x0008;  // Interrupt mask
+    pub const INT_STATUS: u32 = 0x000C; // Interrupt status
+
+    // MAC Address
+    pub const MAC_ADDR0: u32 = 0x0010; // MAC address bytes 0-3
+    pub const MAC_ADDR1: u32 = 0x0014; // MAC address bytes 4-5
+
+    // Transmit
+    pub const TX_CTRL: u32 = 0x0020;   // Transmit control
+    pub const TX_STATUS: u32 = 0x0024; // Transmit status
+    pub const TX_DESC: u32 = 0x0028;   // Transmit descriptor
+    pub const TX_BUF: u32 = 0x002C;    // Transmit buffer
+
+    // Receive
+    pub const RX_CTRL: u32 = 0x0030;   // Receive control
+    pub const RX_STATUS: u32 = 0x0034; // Receive status
+    pub const RX_DESC: u32 = 0x0038;   // Receive descriptor
+    pub const RX_BUF: u32 = 0x003C;    // Receive buffer
+
+    // MII Management
+    pub const MII_CTRL: u32 = 0x0040;  // MII control
+    pub const MII_DATA: u32 = 0x0044;  // MII data
+    pub const MII_ADDR: u32 = 0x0048;  // MII address
+
+    // Statistics
+    pub const STATS_BASE: u32 = 0x0100; // Statistics counters base
+}
+
+/// Peripheral block registers (offset 0x300000 from MACE_BASE).
+/// Contains: Audio (AD1843), ISA bridge (PC87312), Keyboard/Mouse (PS/2),
+/// I2C, UST/MSC.
+/// Sourced from Linux `arch/mips/sgi-ip32/mace.h` and IRIX `mace.h`.
+pub mod perif {
+    pub const BASE: u32 = 0x300000;
+
+    // Audio (AD1843) - offset 0x00000
+    pub mod audio {
+        pub const BASE: u32 = 0x00000;
+        pub const CTRL: u32 = 0x0000;   // Control
+        pub const STATUS: u32 = 0x0004; // Status
+        pub const DATA: u32 = 0x0008;   // Data port
+        pub const INDIRECT: u32 = 0x000C; // Indirect register access
+    }
+
+    // ISA Bridge (PC87312) - offset 0x10000
+    pub mod isa {
+        pub const BASE: u32 = 0x10000;
+        pub const CTRL: u32 = 0x0000;   // ISA control
+        pub const STATUS: u32 = 0x0004; // ISA status
+        pub const INT_CTRL: u32 = 0x0008; // Interrupt control
+        pub const DMA_CTRL: u32 = 0x000C; // DMA control
+    }
+
+    // Keyboard/Mouse (PS/2) - offset 0x20000
+    pub mod kbdms {
+        pub const BASE: u32 = 0x20000;
+        pub const KBD_DATA: u32 = 0x0000; // Keyboard data
+        pub const KBD_CTRL: u32 = 0x0004; // Keyboard control
+        pub const MS_DATA: u32 = 0x0008;  // Mouse data
+        pub const MS_CTRL: u32 = 0x000C;  // Mouse control
+        pub const STATUS: u32 = 0x0010;   // Combined status
+    }
+
+    // I2C - offset 0x30000
+    pub mod i2c {
+        pub const BASE: u32 = 0x30000;
+        pub const CTRL: u32 = 0x0000;   // I2C control
+        pub const STATUS: u32 = 0x0004; // I2C status
+        pub const DATA: u32 = 0x0008;   // I2C data
+        pub const ADDR: u32 = 0x000C;   // I2C address
+    }
+
+    // UST/MSC (Unadjusted System Time / Media Stream Counter) - offset 0x40000
+    pub mod ustmsc {
+        pub const BASE: u32 = 0x40000;
+        pub const UST_LO: u32 = 0x0000; // UST low 32 bits
+        pub const UST_HI: u32 = 0x0004; // UST high 32 bits
+        pub const MSC_LO: u32 = 0x0008; // MSC low 32 bits
+        pub const MSC_HI: u32 = 0x000C; // MSC high 32 bits
+        pub const CTRL: u32 = 0x0010;   // Control
+    }
+}
+
+/// ISA External block registers (offset 0x380000 from MACE_BASE).
+/// Contains: EPP, ECP, Serial 1 (NS16550), Serial 2 (NS16550),
+/// RTC (DS12887), Game port.
+/// Sourced from Linux `arch/mips/sgi-ip32/mace.h` and IRIX `mace.h`.
+pub mod isa_ext {
+    pub const BASE: u32 = 0x380000;
+
+    // EPP (Enhanced Parallel Port) - offset 0x00000
+    pub mod epp {
+        pub const BASE: u32 = 0x00000;
+        pub const DATA: u32 = 0x0000;   // Data port
+        pub const ADDR: u32 = 0x0004;   // Address port
+        pub const CTRL: u32 = 0x0008;   // Control
+        pub const STATUS: u32 = 0x000C; // Status
+    }
+
+    // ECP (Extended Capabilities Port) - offset 0x08000
+    pub mod ecp {
+        pub const BASE: u32 = 0x08000;
+        pub const DATA: u32 = 0x0000;   // Data FIFO
+        pub const ADDR: u32 = 0x0004;   // Address
+        pub const CTRL: u32 = 0x0008;   // Control
+        pub const STATUS: u32 = 0x000C; // Status
+    }
+
+    // Serial 1 (NS16550 UART) - offset 0x10000
+    pub mod uart1 {
+        pub const BASE: u32 = 0x10000;
+        // NS16550 registers (8-bit, but accessed as 32-bit on O2)
+        pub const RBR: u32 = 0x0000;    // Receive Buffer Register (read)
+        pub const THR: u32 = 0x0000;    // Transmit Holding Register (write)
+        pub const IER: u32 = 0x0004;    // Interrupt Enable Register
+        pub const IIR: u32 = 0x0008;    // Interrupt Identification Register (read)
+        pub const FCR: u32 = 0x0008;    // FIFO Control Register (write)
+        pub const LCR: u32 = 0x000C;    // Line Control Register
+        pub const MCR: u32 = 0x0010;    // Modem Control Register
+        pub const LSR: u32 = 0x0014;    // Line Status Register
+        pub const MSR: u32 = 0x0018;    // Modem Status Register
+        pub const SCR: u32 = 0x001C;    // Scratch Register
+        // Divisor latch (when DLAB=1 in LCR)
+        pub const DLL: u32 = 0x0000;    // Divisor Latch Low
+        pub const DLM: u32 = 0x0004;    // Divisor Latch High
+    }
+
+    // Serial 2 (NS16550 UART) - offset 0x18000
+    pub mod uart2 {
+        pub const BASE: u32 = 0x18000;
+        pub const RBR: u32 = 0x0000;
+        pub const THR: u32 = 0x0000;
+        pub const IER: u32 = 0x0004;
+        pub const IIR: u32 = 0x0008;
+        pub const FCR: u32 = 0x0008;
+        pub const LCR: u32 = 0x000C;
+        pub const MCR: u32 = 0x0010;
+        pub const LSR: u32 = 0x0014;
+        pub const MSR: u32 = 0x0018;
+        pub const SCR: u32 = 0x001C;
+        pub const DLL: u32 = 0x0000;
+        pub const DLM: u32 = 0x0004;
+    }
+
+    // RTC (DS12887) - offset 0x20000
+    pub mod rtc {
+        pub const BASE: u32 = 0x20000;
+        pub const SECONDS: u32 = 0x0000;
+        pub const SECONDS_ALARM: u32 = 0x0001;
+        pub const MINUTES: u32 = 0x0002;
+        pub const MINUTES_ALARM: u32 = 0x0003;
+        pub const HOURS: u32 = 0x0004;
+        pub const HOURS_ALARM: u32 = 0x0005;
+        pub const DAY_OF_WEEK: u32 = 0x0006;
+        pub const DAY_OF_MONTH: u32 = 0x0007;
+        pub const MONTH: u32 = 0x0008;
+        pub const YEAR: u32 = 0x0009;
+        pub const REG_A: u32 = 0x000A;
+        pub const REG_B: u32 = 0x000B;
+        pub const REG_C: u32 = 0x000C;
+        pub const REG_D: u32 = 0x000D;
+        // 114 bytes of NVRAM at 0x000E-0x007F
+    }
+
+    // Game port - offset 0x30000
+    pub mod game {
+        pub const BASE: u32 = 0x30000;
+        pub const DATA: u32 = 0x0000;   // Game port data
+        pub const CTRL: u32 = 0x0004;   // Game port control
+    }
+}
+
+/// Video In 1 registers (offset 0x100000 from MACE_BASE).
+pub mod vin1 {
+    pub const BASE: u32 = 0x100000;
+    pub const CTRL: u32 = 0x0000;
+    pub const STATUS: u32 = 0x0004;
+    pub const BUF_ADDR: u32 = 0x0008;
+    pub const BUF_SIZE: u32 = 0x000C;
+}
+
+/// Video In 2 registers (offset 0x180000 from MACE_BASE).
+pub mod vin2 {
+    pub const BASE: u32 = 0x180000;
+    pub const CTRL: u32 = 0x0000;
+    pub const STATUS: u32 = 0x0004;
+    pub const BUF_ADDR: u32 = 0x0008;
+    pub const BUF_SIZE: u32 = 0x000C;
+}
+
+/// Video Out registers (offset 0x200000 from MACE_BASE).
+pub mod vout {
+    pub const BASE: u32 = 0x200000;
+    pub const CTRL: u32 = 0x0000;
+    pub const STATUS: u32 = 0x0004;
+    pub const BUF_ADDR: u32 = 0x0008;
+    pub const BUF_SIZE: u32 = 0x000C;
+}
+
+/// MACE ASIC state.
+#[derive(Debug, Default)]
+pub struct Mace {
+    /// PCI Host Bridge state
+    pub pci: PciState,
+    /// Ethernet (MAC110) state
+    pub enet: EnetState,
+    /// Peripheral block state
+    pub perif: PerifState,
+    /// ISA External block state
+    pub isa_ext: IsaExtState,
+    /// Video In 1 state
+    pub vin1: VinState,
+    /// Video In 2 state
+    pub vin2: VinState,
+    /// Video Out state
+    pub vout: VinState,
+}
+
+impl Mace {
+    /// Create a new MACE ASIC.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Reset the MACE ASIC.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Read a 32-bit register from MACE.
+    pub fn read32(&self, offset: u32) -> u32 {
+        match offset {
+            // PCI
+            pci::BASE..=pci::BASE + 0xFF => self.pci.read32(offset - pci::BASE),
+            // Ethernet
+            enet::BASE..=enet::BASE + 0x1FF => self.enet.read32(offset - enet::BASE),
+            // Peripheral
+            perif::BASE..=perif::BASE + 0x4FFFF => self.perif.read32(offset - perif::BASE),
+            // ISA External
+            isa_ext::BASE..=isa_ext::BASE + 0x3FFFF => self.isa_ext.read32(offset - isa_ext::BASE),
+            // Video In 1
+            vin1::BASE..=vin1::BASE + 0xFF => self.vin1.read32(offset - vin1::BASE),
+            // Video In 2
+            vin2::BASE..=vin2::BASE + 0xFF => self.vin2.read32(offset - vin2::BASE),
+            // Video Out
+            vout::BASE..=vout::BASE + 0xFF => self.vout.read32(offset - vout::BASE),
+            _ => {
+                log::warn!("MACE read32: unimplemented offset 0x{:08X}", offset);
+                0
+            }
+        }
+    }
+
+    /// Write a 32-bit register to MACE.
+    pub fn write32(&mut self, offset: u32, value: u32) {
+        match offset {
+            // PCI
+            pci::BASE..=pci::BASE + 0xFF => self.pci.write32(offset - pci::BASE, value),
+            // Ethernet
+            enet::BASE..=enet::BASE + 0x1FF => self.enet.write32(offset - enet::BASE, value),
+            // Peripheral
+            perif::BASE..=perif::BASE + 0x4FFFF => self.perif.write32(offset - perif::BASE, value),
+            // ISA External
+            isa_ext::BASE..=isa_ext::BASE + 0x3FFFF => self.isa_ext.write32(offset - isa_ext::BASE, value),
+            // Video In 1
+            vin1::BASE..=vin1::BASE + 0xFF => self.vin1.write32(offset - vin1::BASE, value),
+            // Video In 2
+            vin2::BASE..=vin2::BASE + 0xFF => self.vin2.write32(offset - vin2::BASE, value),
+            // Video Out
+            vout::BASE..=vout::BASE + 0xFF => self.vout.write32(offset - vout::BASE, value),
+            _ => {
+                log::warn!("MACE write32: unimplemented offset 0x{:08X} = 0x{:08X}", offset, value);
+            }
+        }
+    }
+}
+
+/// PCI Host Bridge state.
+#[derive(Debug, Default)]
+pub struct PciState {
+    pub cfg_addr: u32,
+    pub cfg_data: u32,
+    pub mem_base: u32,
+    pub mem_limit: u32,
+    pub io_base: u32,
+    pub io_limit: u32,
+    pub ctrl: u32,
+    pub status: u32,
+    pub int_ack: u32,
+    pub int_mask: u32,
+    pub arb_ctrl: u32,
+    pub arb_pri: u32,
+    pub err_addr: u32,
+    pub err_cmd: u32,
+}
+
+impl PciState {
+    pub fn read32(&self, offset: u32) -> u32 {
+        match offset {
+            pci::CFG_ADDR => self.cfg_addr,
+            pci::CFG_DATA => self.cfg_data,
+            pci::MEM_BASE => self.mem_base,
+            pci::MEM_LIMIT => self.mem_limit,
+            pci::IO_BASE => self.io_base,
+            pci::IO_LIMIT => self.io_limit,
+            pci::CTRL => self.ctrl,
+            pci::STATUS => self.status,
+            pci::INT_ACK => self.int_ack,
+            pci::INT_MASK => self.int_mask,
+            pci::ARB_CTRL => self.arb_ctrl,
+            pci::ARB_PRI => self.arb_pri,
+            pci::ERR_ADDR => self.err_addr,
+            pci::ERR_CMD => self.err_cmd,
+            _ => {
+                log::warn!("PCI read32: unimplemented offset 0x{:04X}", offset);
+                0
+            }
+        }
+    }
+
+    pub fn write32(&mut self, offset: u32, value: u32) {
+        match offset {
+            pci::CFG_ADDR => self.cfg_addr = value,
+            pci::CFG_DATA => self.cfg_data = value,
+            pci::MEM_BASE => self.mem_base = value,
+            pci::MEM_LIMIT => self.mem_limit = value,
+            pci::IO_BASE => self.io_base = value,
+            pci::IO_LIMIT => self.io_limit = value,
+            pci::CTRL => self.ctrl = value,
+            pci::STATUS => self.status = value,
+            pci::INT_ACK => self.int_ack = value,
+            pci::INT_MASK => self.int_mask = value,
+            pci::ARB_CTRL => self.arb_ctrl = value,
+            pci::ARB_PRI => self.arb_pri = value,
+            pci::ERR_ADDR => self.err_addr = value,
+            pci::ERR_CMD => self.err_cmd = value,
+            _ => {
+                log::warn!("PCI write32: unimplemented offset 0x{:04X} = 0x{:08X}", offset, value);
+            }
+        }
+    }
+}
+
+/// Ethernet (MAC110) state.
+#[derive(Debug, Default)]
+pub struct EnetState {
+    pub ctrl: u32,
+    pub status: u32,
+    pub int_mask: u32,
+    pub int_status: u32,
+    pub mac_addr0: u32,
+    pub mac_addr1: u32,
+    pub tx_ctrl: u32,
+    pub tx_status: u32,
+    pub tx_desc: u32,
+    pub tx_buf: u32,
+    pub rx_ctrl: u32,
+    pub rx_status: u32,
+    pub rx_desc: u32,
+    pub rx_buf: u32,
+    pub mii_ctrl: u32,
+    pub mii_data: u32,
+    pub mii_addr: u32,
+    // Statistics counters (simplified)
+    pub stats: [u32; 32],
+}
+
+impl EnetState {
+    pub fn read32(&self, offset: u32) -> u32 {
+        match offset {
+            enet::CTRL => self.ctrl,
+            enet::STATUS => self.status,
+            enet::INT_MASK => self.int_mask,
+            enet::INT_STATUS => self.int_status,
+            enet::MAC_ADDR0 => self.mac_addr0,
+            enet::MAC_ADDR1 => self.mac_addr1,
+            enet::TX_CTRL => self.tx_ctrl,
+            enet::TX_STATUS => self.tx_status,
+            enet::TX_DESC => self.tx_desc,
+            enet::TX_BUF => self.tx_buf,
+            enet::RX_CTRL => self.rx_ctrl,
+            enet::RX_STATUS => self.rx_status,
+            enet::RX_DESC => self.rx_desc,
+            enet::RX_BUF => self.rx_buf,
+            enet::MII_CTRL => self.mii_ctrl,
+            enet::MII_DATA => self.mii_data,
+            enet::MII_ADDR => self.mii_addr,
+            enet::STATS_BASE..=enet::STATS_BASE + 0x7C => {
+                let idx = ((offset - enet::STATS_BASE) / 4) as usize;
+                if idx < self.stats.len() { self.stats[idx] } else { 0 }
+            }
+            _ => {
+                log::warn!("ENET read32: unimplemented offset 0x{:04X}", offset);
+                0
+            }
+        }
+    }
+
+    pub fn write32(&mut self, offset: u32, value: u32) {
+        match offset {
+            enet::CTRL => self.ctrl = value,
+            enet::STATUS => self.status = value,
+            enet::INT_MASK => self.int_mask = value,
+            enet::INT_STATUS => self.int_status = value,
+            enet::MAC_ADDR0 => self.mac_addr0 = value,
+            enet::MAC_ADDR1 => self.mac_addr1 = value,
+            enet::TX_CTRL => self.tx_ctrl = value,
+            enet::TX_STATUS => self.tx_status = value,
+            enet::TX_DESC => self.tx_desc = value,
+            enet::TX_BUF => self.tx_buf = value,
+            enet::RX_CTRL => self.rx_ctrl = value,
+            enet::RX_STATUS => self.rx_status = value,
+            enet::RX_DESC => self.rx_desc = value,
+            enet::RX_BUF => self.rx_buf = value,
+            enet::MII_CTRL => self.mii_ctrl = value,
+            enet::MII_DATA => self.mii_data = value,
+            enet::MII_ADDR => self.mii_addr = value,
+            enet::STATS_BASE..=enet::STATS_BASE + 0x7C => {
+                let idx = ((offset - enet::STATS_BASE) / 4) as usize;
+                if idx < self.stats.len() { self.stats[idx] = value; }
+            }
+            _ => {
+                log::warn!("ENET write32: unimplemented offset 0x{:04X} = 0x{:08X}", offset, value);
+            }
+        }
+    }
+}
+
+/// Peripheral block state.
+#[derive(Debug, Default)]
+pub struct PerifState {
+    pub audio: AudioState,
+    pub isa: IsaState,
+    pub kbdms: KbdMsState,
+    pub i2c: I2cState,
+    pub ustmsc: UstMscState,
+}
+
+impl PerifState {
+    pub fn read32(&self, offset: u32) -> u32 {
+        match offset {
+            perif::audio::BASE..=perif::audio::BASE + 0xFF => self.audio.read32(offset - perif::audio::BASE),
+            perif::isa::BASE..=perif::isa::BASE + 0xFF => self.isa.read32(offset - perif::isa::BASE),
+            perif::kbdms::BASE..=perif::kbdms::BASE + 0xFF => self.kbdms.read32(offset - perif::kbdms::BASE),
+            perif::i2c::BASE..=perif::i2c::BASE + 0xFF => self.i2c.read32(offset - perif::i2c::BASE),
+            perif::ustmsc::BASE..=perif::ustmsc::BASE + 0xFF => self.ustmsc.read32(offset - perif::ustmsc::BASE),
+            _ => {
+                log::warn!("PERIF read32: unimplemented offset 0x{:05X}", offset);
+                0
+            }
+        }
+    }
+
+    pub fn write32(&mut self, offset: u32, value: u32) {
+        match offset {
+            perif::audio::BASE..=perif::audio::BASE + 0xFF => self.audio.write32(offset - perif::audio::BASE, value),
+            perif::isa::BASE..=perif::isa::BASE + 0xFF => self.isa.write32(offset - perif::isa::BASE, value),
+            perif::kbdms::BASE..=perif::kbdms::BASE + 0xFF => self.kbdms.write32(offset - perif::kbdms::BASE, value),
+            perif::i2c::BASE..=perif::i2c::BASE + 0xFF => self.i2c.write32(offset - perif::i2c::BASE, value),
+            perif::ustmsc::BASE..=perif::ustmsc::BASE + 0xFF => self.ustmsc.write32(offset - perif::ustmsc::BASE, value),
+            _ => {
+                log::warn!("PERIF write32: unimplemented offset 0x{:05X} = 0x{:08X}", offset, value);
+            }
+        }
+    }
+}
+
+/// Audio (AD1843) state.
+#[derive(Debug, Default)]
+pub struct AudioState {
+    pub ctrl: u32,
+    pub status: u32,
+    pub data: u32,
+    pub indirect: u32,
+}
+
+impl AudioState {
+    pub fn read32(&self, offset: u32) -> u32 {
+        match offset {
+            perif::audio::CTRL => self.ctrl,
+            perif::audio::STATUS => self.status,
+            perif::audio::DATA => self.data,
+            perif::audio::INDIRECT => self.indirect,
+            _ => {
+                log::warn!("AUDIO read32: unimplemented offset 0x{:04X}", offset);
+                0
+            }
+        }
+    }
+
+    pub fn write32(&mut self, offset: u32, value: u32) {
+        match offset {
+            perif::audio::CTRL => self.ctrl = value,
+            perif::audio::STATUS => self.status = value,
+            perif::audio::DATA => self.data = value,
+            perif::audio::INDIRECT => self.indirect = value,
+            _ => {
+                log::warn!("AUDIO write32: unimplemented offset 0x{:04X} = 0x{:08X}", offset, value);
+            }
+        }
+    }
+}
+
+/// ISA Bridge (PC87312) state.
+#[derive(Debug, Default)]
+pub struct IsaState {
+    pub ctrl: u32,
+    pub status: u32,
+    pub int_ctrl: u32,
+    pub dma_ctrl: u32,
+}
+
+impl IsaState {
+    pub fn read32(&self, offset: u32) -> u32 {
+        match offset {
+            perif::isa::CTRL => self.ctrl,
+            perif::isa::STATUS => self.status,
+            perif::isa::INT_CTRL => self.int_ctrl,
+            perif::isa::DMA_CTRL => self.dma_ctrl,
+            _ => {
+                log::warn!("ISA read32: unimplemented offset 0x{:04X}", offset);
+                0
+            }
+        }
+    }
+
+    pub fn write32(&mut self, offset: u32, value: u32) {
+        match offset {
+            perif::isa::CTRL => self.ctrl = value,
+            perif::isa::STATUS => self.status = value,
+            perif::isa::INT_CTRL => self.int_ctrl = value,
+            perif::isa::DMA_CTRL => self.dma_ctrl = value,
+            _ => {
+                log::warn!("ISA write32: unimplemented offset 0x{:04X} = 0x{:08X}", offset, value);
+            }
+        }
+    }
+}
+
+/// Keyboard/Mouse (PS/2) state.
+#[derive(Debug, Default)]
+pub struct KbdMsState {
+    pub kbd_data: u32,
+    pub kbd_ctrl: u32,
+    pub ms_data: u32,
+    pub ms_ctrl: u32,
+    pub status: u32,
+}
+
+impl KbdMsState {
+    pub fn read32(&self, offset: u32) -> u32 {
+        match offset {
+            perif::kbdms::KBD_DATA => self.kbd_data,
+            perif::kbdms::KBD_CTRL => self.kbd_ctrl,
+            perif::kbdms::MS_DATA => self.ms_data,
+            perif::kbdms::MS_CTRL => self.ms_ctrl,
+            perif::kbdms::STATUS => self.status,
+            _ => {
+                log::warn!("KBD/MS read32: unimplemented offset 0x{:04X}", offset);
+                0
+            }
+        }
+    }
+
+    pub fn write32(&mut self, offset: u32, value: u32) {
+        match offset {
+            perif::kbdms::KBD_DATA => self.kbd_data = value,
+            perif::kbdms::KBD_CTRL => self.kbd_ctrl = value,
+            perif::kbdms::MS_DATA => self.ms_data = value,
+            perif::kbdms::MS_CTRL => self.ms_ctrl = value,
+            perif::kbdms::STATUS => self.status = value,
+            _ => {
+                log::warn!("KBD/MS write32: unimplemented offset 0x{:04X} = 0x{:08X}", offset, value);
+            }
+        }
+    }
+}
+
+/// I2C state.
+#[derive(Debug, Default)]
+pub struct I2cState {
+    pub ctrl: u32,
+    pub status: u32,
+    pub data: u32,
+    pub addr: u32,
+}
+
+impl I2cState {
+    pub fn read32(&self, offset: u32) -> u32 {
+        match offset {
+            perif::i2c::CTRL => self.ctrl,
+            perif::i2c::STATUS => self.status,
+            perif::i2c::DATA => self.data,
+            perif::i2c::ADDR => self.addr,
+            _ => {
+                log::warn!("I2C read32: unimplemented offset 0x{:04X}", offset);
+                0
+            }
+        }
+    }
+
+    pub fn write32(&mut self, offset: u32, value: u32) {
+        match offset {
+            perif::i2c::CTRL => self.ctrl = value,
+            perif::i2c::STATUS => self.status = value,
+            perif::i2c::DATA => self.data = value,
+            perif::i2c::ADDR => self.addr = value,
+            _ => {
+                log::warn!("I2C write32: unimplemented offset 0x{:04X} = 0x{:08X}", offset, value);
+            }
+        }
+    }
+}
+
+/// UST/MSC state.
+#[derive(Debug, Default)]
+pub struct UstMscState {
+    pub ust_lo: u32,
+    pub ust_hi: u32,
+    pub msc_lo: u32,
+    pub msc_hi: u32,
+    pub ctrl: u32,
+}
+
+impl UstMscState {
+    pub fn read32(&self, offset: u32) -> u32 {
+        match offset {
+            perif::ustmsc::UST_LO => self.ust_lo,
+            perif::ustmsc::UST_HI => self.ust_hi,
+            perif::ustmsc::MSC_LO => self.msc_lo,
+            perif::ustmsc::MSC_HI => self.msc_hi,
+            perif::ustmsc::CTRL => self.ctrl,
+            _ => {
+                log::warn!("UST/MSC read32: unimplemented offset 0x{:04X}", offset);
+                0
+            }
+        }
+    }
+
+    pub fn write32(&mut self, offset: u32, value: u32) {
+        match offset {
+            perif::ustmsc::UST_LO => self.ust_lo = value,
+            perif::ustmsc::UST_HI => self.ust_hi = value,
+            perif::ustmsc::MSC_LO => self.msc_lo = value,
+            perif::ustmsc::MSC_HI => self.msc_hi = value,
+            perif::ustmsc::CTRL => self.ctrl = value,
+            _ => {
+                log::warn!("UST/MSC write32: unimplemented offset 0x{:04X} = 0x{:08X}", offset, value);
+            }
+        }
+    }
+}
+
+/// ISA External block state.
+#[derive(Debug, Default)]
+pub struct IsaExtState {
+    pub epp: EppState,
+    pub ecp: EcpState,
+    pub uart1: UartState,
+    pub uart2: UartState,
+    pub rtc: RtcState,
+    pub game: GameState,
+}
+
+impl IsaExtState {
+    pub fn read32(&self, offset: u32) -> u32 {
+        match offset {
+            isa_ext::epp::BASE..=isa_ext::epp::BASE + 0xFF => self.epp.read32(offset - isa_ext::epp::BASE),
+            isa_ext::ecp::BASE..=isa_ext::ecp::BASE + 0xFF => self.ecp.read32(offset - isa_ext::ecp::BASE),
+            isa_ext::uart1::BASE..=isa_ext::uart1::BASE + 0xFF => self.uart1.read32(offset - isa_ext::uart1::BASE),
+            isa_ext::uart2::BASE..=isa_ext::uart2::BASE + 0xFF => self.uart2.read32(offset - isa_ext::uart2::BASE),
+            isa_ext::rtc::BASE..=isa_ext::rtc::BASE + 0xFF => self.rtc.read32(offset - isa_ext::rtc::BASE),
+            isa_ext::game::BASE..=isa_ext::game::BASE + 0xFF => self.game.read32(offset - isa_ext::game::BASE),
+            _ => {
+                log::warn!("ISA_EXT read32: unimplemented offset 0x{:05X}", offset);
+                0
+            }
+        }
+    }
+
+    pub fn write32(&mut self, offset: u32, value: u32) {
+        match offset {
+            isa_ext::epp::BASE..=isa_ext::epp::BASE + 0xFF => self.epp.write32(offset - isa_ext::epp::BASE, value),
+            isa_ext::ecp::BASE..=isa_ext::ecp::BASE + 0xFF => self.ecp.write32(offset - isa_ext::ecp::BASE, value),
+            isa_ext::uart1::BASE..=isa_ext::uart1::BASE + 0xFF => self.uart1.write32(offset - isa_ext::uart1::BASE, value),
+            isa_ext::uart2::BASE..=isa_ext::uart2::BASE + 0xFF => self.uart2.write32(offset - isa_ext::uart2::BASE, value),
+            isa_ext::rtc::BASE..=isa_ext::rtc::BASE + 0xFF => self.rtc.write32(offset - isa_ext::rtc::BASE, value),
+            isa_ext::game::BASE..=isa_ext::game::BASE + 0xFF => self.game.write32(offset - isa_ext::game::BASE, value),
+            _ => {
+                log::warn!("ISA_EXT write32: unimplemented offset 0x{:05X} = 0x{:08X}", offset, value);
+            }
+        }
+    }
+}
+
+/// EPP (Enhanced Parallel Port) state.
+#[derive(Debug, Default)]
+pub struct EppState {
+    pub data: u32,
+    pub addr: u32,
+    pub ctrl: u32,
+    pub status: u32,
+}
+
+impl EppState {
+    pub fn read32(&self, offset: u32) -> u32 {
+        match offset {
+            isa_ext::epp::DATA => self.data,
+            isa_ext::epp::ADDR => self.addr,
+            isa_ext::epp::CTRL => self.ctrl,
+            isa_ext::epp::STATUS => self.status,
+            _ => {
+                log::warn!("EPP read32: unimplemented offset 0x{:04X}", offset);
+                0
+            }
+        }
+    }
+
+    pub fn write32(&mut self, offset: u32, value: u32) {
+        match offset {
+            isa_ext::epp::DATA => self.data = value,
+            isa_ext::epp::ADDR => self.addr = value,
+            isa_ext::epp::CTRL => self.ctrl = value,
+            isa_ext::epp::STATUS => self.status = value,
+            _ => {
+                log::warn!("EPP write32: unimplemented offset 0x{:04X} = 0x{:08X}", offset, value);
+            }
+        }
+    }
+}
+
+/// ECP (Extended Capabilities Port) state.
+#[derive(Debug, Default)]
+pub struct EcpState {
+    pub data: u32,
+    pub addr: u32,
+    pub ctrl: u32,
+    pub status: u32,
+}
+
+impl EcpState {
+    pub fn read32(&self, offset: u32) -> u32 {
+        match offset {
+            isa_ext::ecp::DATA => self.data,
+            isa_ext::ecp::ADDR => self.addr,
+            isa_ext::ecp::CTRL => self.ctrl,
+            isa_ext::ecp::STATUS => self.status,
+            _ => {
+                log::warn!("ECP read32: unimplemented offset 0x{:04X}", offset);
+                0
+            }
+        }
+    }
+
+    pub fn write32(&mut self, offset: u32, value: u32) {
+        match offset {
+            isa_ext::ecp::DATA => self.data = value,
+            isa_ext::ecp::ADDR => self.addr = value,
+            isa_ext::ecp::CTRL => self.ctrl = value,
+            isa_ext::ecp::STATUS => self.status = value,
+            _ => {
+                log::warn!("ECP write32: unimplemented offset 0x{:04X} = 0x{:08X}", offset, value);
+            }
+        }
+    }
+}
+
+/// NS16550 UART state.
+#[derive(Debug, Default)]
+pub struct UartState {
+    // Registers (with DLAB=0)
+    pub rbr: u8,   // Receive Buffer Register
+    pub thr: u8,   // Transmit Holding Register
+    pub ier: u8,   // Interrupt Enable Register
+    pub iir: u8,   // Interrupt Identification Register
+    pub fcr: u8,   // FIFO Control Register
+    pub lcr: u8,   // Line Control Register
+    pub mcr: u8,   // Modem Control Register
+    pub lsr: u8,   // Line Status Register
+    pub msr: u8,   // Modem Status Register
+    pub scr: u8,   // Scratch Register
+    // Divisor latch (with DLAB=1)
+    pub dll: u8,   // Divisor Latch Low
+    pub dlm: u8,   // Divisor Latch High
+    // Internal state
+    pub dlab: bool,
+}
+
+impl UartState {
+    pub fn read32(&self, offset: u32) -> u32 {
+        // NS16550 registers are 8-bit but accessed at 32-bit aligned addresses on O2
+        let reg_offset = offset & 0x1F; // Only lower 5 bits used
+        match reg_offset {
+            isa_ext::uart1::RBR | isa_ext::uart2::RBR => {
+                if self.dlab { self.dll as u32 } else { self.rbr as u32 }
+            }
+            isa_ext::uart1::IER | isa_ext::uart2::IER => {
+                if self.dlab { self.dlm as u32 } else { self.ier as u32 }
+            }
+            isa_ext::uart1::IIR | isa_ext::uart2::IIR => self.iir as u32,
+            isa_ext::uart1::LCR | isa_ext::uart2::LCR => self.lcr as u32,
+            isa_ext::uart1::MCR | isa_ext::uart2::MCR => self.mcr as u32,
+            isa_ext::uart1::LSR | isa_ext::uart2::LSR => self.lsr as u32,
+            isa_ext::uart1::MSR | isa_ext::uart2::MSR => self.msr as u32,
+            isa_ext::uart1::SCR | isa_ext::uart2::SCR => self.scr as u32,
+            _ => {
+                log::warn!("UART read32: unimplemented offset 0x{:04X}", offset);
+                0
+            }
+        }
+    }
+
+    pub fn write32(&mut self, offset: u32, value: u32) {
+        let reg_offset = offset & 0x1F;
+        let val = value as u8;
+        match reg_offset {
+            isa_ext::uart1::THR | isa_ext::uart2::THR => {
+                if self.dlab { self.dll = val; } else { self.thr = val; }
+            }
+            isa_ext::uart1::IER | isa_ext::uart2::IER => {
+                if self.dlab { self.dlm = val; } else { self.ier = val; }
+            }
+            isa_ext::uart1::FCR | isa_ext::uart2::FCR => self.fcr = val,
+            isa_ext::uart1::LCR | isa_ext::uart2::LCR => {
+                self.lcr = val;
+                self.dlab = (val & 0x80) != 0; // DLAB is bit 7
+            }
+            isa_ext::uart1::MCR | isa_ext::uart2::MCR => self.mcr = val,
+            isa_ext::uart1::SCR | isa_ext::uart2::SCR => self.scr = val,
+            _ => {
+                log::warn!("UART write32: unimplemented offset 0x{:04X} = 0x{:08X}", offset, value);
+            }
+        }
+    }
+}
+
+/// RTC (DS12887) state.
+#[derive(Debug, Default)]
+pub struct RtcState {
+    pub regs: [u8; 128], // 0x00-0x7F
+}
+
+impl RtcState {
+    pub fn read32(&self, offset: u32) -> u32 {
+        if offset < 128 {
+            self.regs[offset as usize] as u32
+        } else {
+            log::warn!("RTC read32: unimplemented offset 0x{:04X}", offset);
+            0
+        }
+    }
+
+    pub fn write32(&mut self, offset: u32, value: u32) {
+        if offset < 128 {
+            self.regs[offset as usize] = value as u8;
+        } else {
+            log::warn!("RTC write32: unimplemented offset 0x{:04X} = 0x{:08X}", offset, value);
+        }
+    }
+}
+
+/// Game port state.
+#[derive(Debug, Default)]
+pub struct GameState {
+    pub data: u32,
+    pub ctrl: u32,
+}
+
+impl GameState {
+    pub fn read32(&self, offset: u32) -> u32 {
+        match offset {
+            isa_ext::game::DATA => self.data,
+            isa_ext::game::CTRL => self.ctrl,
+            _ => {
+                log::warn!("GAME read32: unimplemented offset 0x{:04X}", offset);
+                0
+            }
+        }
+    }
+
+    pub fn write32(&mut self, offset: u32, value: u32) {
+        match offset {
+            isa_ext::game::DATA => self.data = value,
+            isa_ext::game::CTRL => self.ctrl = value,
+            _ => {
+                log::warn!("GAME write32: unimplemented offset 0x{:04X} = 0x{:08X}", offset, value);
+            }
+        }
+    }
+}
+
+/// Video In state (VIN1/VIN2).
+#[derive(Debug, Default)]
+pub struct VinState {
+    pub ctrl: u32,
+    pub status: u32,
+    pub buf_addr: u32,
+    pub buf_size: u32,
+}
+
+impl VinState {
+    pub fn read32(&self, offset: u32) -> u32 {
+        match offset {
+            vin1::CTRL => self.ctrl,
+            vin1::STATUS => self.status,
+            vin1::BUF_ADDR => self.buf_addr,
+            vin1::BUF_SIZE => self.buf_size,
+            _ => {
+                log::warn!("VIN read32: unimplemented offset 0x{:04X}", offset);
+                0
+            }
+        }
+    }
+
+    pub fn write32(&mut self, offset: u32, value: u32) {
+        match offset {
+            vin1::CTRL => self.ctrl = value,
+            vin1::STATUS => self.status = value,
+            vin1::BUF_ADDR => self.buf_addr = value,
+            vin1::BUF_SIZE => self.buf_size = value,
+            _ => {
+                log::warn!("VIN write32: unimplemented offset 0x{:04X} = 0x{:08X}", offset, value);
+            }
+        }
+    }
+}
+
 /// The I/O subsystem state.
 ///
-/// Placeholder — will hold the MACE ASIC state (PCI, ISA, PS/2, Ethernet,
-/// audio, SCSI) once milestone M3 begins.
+/// Holds the MACE ASIC state (PCI, ISA, PS/2, Ethernet, audio, SCSI).
 #[derive(Debug, Default)]
 pub struct Io {
-    /// Whether the MACE ASIC is present.
-    pub present: bool,
+    /// The MACE ASIC.
+    pub mace: Mace,
 }
 
 impl Io {
     /// Create a new I/O subsystem.
     pub fn new() -> Self {
-        Self { present: true }
+        Self { mace: Mace::new() }
     }
 
     /// Reset the I/O subsystem.
     pub fn reset(&mut self) {
-        *self = Self::default();
-        self.present = true;
+        self.mace.reset();
+    }
+
+    /// Read a 32-bit value from MACE address space.
+    pub fn read32(&self, addr: u32) -> u32 {
+        if addr >= MACE_BASE && addr < MACE_BASE + 0x400000 {
+            self.mace.read32(addr - MACE_BASE)
+        } else {
+            log::warn!("Io read32: address 0x{:08X} outside MACE range", addr);
+            0
+        }
+    }
+
+    /// Write a 32-bit value to MACE address space.
+    pub fn write32(&mut self, addr: u32, value: u32) {
+        if addr >= MACE_BASE && addr < MACE_BASE + 0x400000 {
+            self.mace.write32(addr - MACE_BASE, value);
+        } else {
+            log::warn!("Io write32: address 0x{:08X} outside MACE range", addr);
+        }
     }
 }
