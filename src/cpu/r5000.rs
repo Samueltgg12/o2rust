@@ -176,7 +176,7 @@ impl R5000 {
     }
 
     // === SPECIAL (opcode 0x00) ===
-    fn execute_special(&mut self, instr: u32, mem: &mut dyn MemoryAccess) {
+    fn execute_special(&mut self, instr: u32, _mem: &mut dyn MemoryAccess) {
         let funct = instr & 0x3f;
         let rs = ((instr >> 21) & 0x1f) as usize;
         let rt = ((instr >> 16) & 0x1f) as usize;
