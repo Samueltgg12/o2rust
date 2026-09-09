@@ -1395,13 +1395,29 @@ impl R5000 {
             0x01 => fd_val - fs_val,      // SUB.D
             0x02 => fd_val * fs_val,      // MUL.D
             0x03 => fd_val / fs_val,      // DIV.D
+            0x04 => fd_val.sqrt(),        // SQRT.D
             0x05 => fd_val.abs(),         // ABS.D
             0x06 => fd_val,               // MOV.D
             0x07 => -fd_val,              // NEG.D
+            0x08 => fd_val.round() as f64, // ROUND.L.D (round to long)
+            0x09 => fd_val.trunc() as f64, // TRUNC.L.D (truncate to long)
+            0x0a => fd_val.ceil() as f64,  // CEIL.L.D (ceiling to long)
+            0x0b => fd_val.floor() as f64, // FLOOR.L.D (floor to long)
+            0x0c => fd_val.round() as f64, // ROUND.W.D (round to word)
+            0x0d => fd_val.trunc() as f64, // TRUNC.W.D (truncate to word)
+            0x0e => fd_val.ceil() as f64,  // CEIL.W.D (ceiling to word)
+            0x0f => fd_val.floor() as f64, // FLOOR.W.D (floor to word)
+            0x10 => 1.0 / fd_val,         // RECIP.D (reciprocal approximation)
+            0x11 => 1.0 / fd_val.sqrt(),  // RSQRT.D (reciprocal sqrt approximation)
             0x20 => {
                 // CVT.D.S - convert single to double
                 let s_val = f32::from_bits(self.state.fpr[fs] as u32);
                 s_val as f64
+            }
+            0x21 => {
+                // CVT.D.L - convert long to double
+                let l_val = self.state.fpr[fs] as i64;
+                l_val as f64
             }
             0x25 => {
                 // CVT.D.W - convert word to double

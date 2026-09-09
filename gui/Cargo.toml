@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 o2rust.workspace = true
 eframe.workspace = true
+egui-winit   = "0.36.2"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
