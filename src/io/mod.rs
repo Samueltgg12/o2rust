@@ -13,8 +13,6 @@
 //! Register maps sourced from Linux `arch/mips/sgi-ip32/`, NetBSD `sys/arch/sgimips/`,
 //! and leaked IRIX source `stand/arcs/`.
 
-use crate::cpu::r5000::MemoryAccess;
-
 /// MACE base address (IRIX `mace.h`).
 pub const MACE_BASE: u32 = 0x1f00_0000;
 
@@ -311,19 +309,19 @@ impl Mace {
     pub fn read32(&self, offset: u32) -> u32 {
         match offset {
             // PCI
-            pci::BASE..=pci::BASE + 0xFF => self.pci.read32(offset - pci::BASE),
+            offset if offset >= pci::BASE && offset <= pci::BASE + 0xFF => self.pci.read32(offset - pci::BASE),
             // Ethernet
-            enet::BASE..=enet::BASE + 0x1FF => self.enet.read32(offset - enet::BASE),
+            offset if offset >= enet::BASE && offset <= enet::BASE + 0x1FF => self.enet.read32(offset - enet::BASE),
             // Peripheral
-            perif::BASE..=perif::BASE + 0x4FFFF => self.perif.read32(offset - perif::BASE),
+            offset if offset >= perif::BASE && offset <= perif::BASE + 0x4FFFF => self.perif.read32(offset - perif::BASE),
             // ISA External
-            isa_ext::BASE..=isa_ext::BASE + 0x3FFFF => self.isa_ext.read32(offset - isa_ext::BASE),
+            offset if offset >= isa_ext::BASE && offset <= isa_ext::BASE + 0x3FFFF => self.isa_ext.read32(offset - isa_ext::BASE),
             // Video In 1
-            vin1::BASE..=vin1::BASE + 0xFF => self.vin1.read32(offset - vin1::BASE),
+            offset if offset >= vin1::BASE && offset <= vin1::BASE + 0xFF => self.vin1.read32(offset - vin1::BASE),
             // Video In 2
-            vin2::BASE..=vin2::BASE + 0xFF => self.vin2.read32(offset - vin2::BASE),
+            offset if offset >= vin2::BASE && offset <= vin2::BASE + 0xFF => self.vin2.read32(offset - vin2::BASE),
             // Video Out
-            vout::BASE..=vout::BASE + 0xFF => self.vout.read32(offset - vout::BASE),
+            offset if offset >= vout::BASE && offset <= vout::BASE + 0xFF => self.vout.read32(offset - vout::BASE),
             _ => {
                 log::warn!("MACE read32: unimplemented offset 0x{:08X}", offset);
                 0
@@ -335,19 +333,19 @@ impl Mace {
     pub fn write32(&mut self, offset: u32, value: u32) {
         match offset {
             // PCI
-            pci::BASE..=pci::BASE + 0xFF => self.pci.write32(offset - pci::BASE, value),
+            offset if offset >= pci::BASE && offset <= pci::BASE + 0xFF => self.pci.write32(offset - pci::BASE, value),
             // Ethernet
-            enet::BASE..=enet::BASE + 0x1FF => self.enet.write32(offset - enet::BASE, value),
+            offset if offset >= enet::BASE && offset <= enet::BASE + 0x1FF => self.enet.write32(offset - enet::BASE, value),
             // Peripheral
-            perif::BASE..=perif::BASE + 0x4FFFF => self.perif.write32(offset - perif::BASE, value),
+            offset if offset >= perif::BASE && offset <= perif::BASE + 0x4FFFF => self.perif.write32(offset - perif::BASE, value),
             // ISA External
-            isa_ext::BASE..=isa_ext::BASE + 0x3FFFF => self.isa_ext.write32(offset - isa_ext::BASE, value),
+            offset if offset >= isa_ext::BASE && offset <= isa_ext::BASE + 0x3FFFF => self.isa_ext.write32(offset - isa_ext::BASE, value),
             // Video In 1
-            vin1::BASE..=vin1::BASE + 0xFF => self.vin1.write32(offset - vin1::BASE, value),
+            offset if offset >= vin1::BASE && offset <= vin1::BASE + 0xFF => self.vin1.write32(offset - vin1::BASE, value),
             // Video In 2
-            vin2::BASE..=vin2::BASE + 0xFF => self.vin2.write32(offset - vin2::BASE, value),
+            offset if offset >= vin2::BASE && offset <= vin2::BASE + 0xFF => self.vin2.write32(offset - vin2::BASE, value),
             // Video Out
-            vout::BASE..=vout::BASE + 0xFF => self.vout.write32(offset - vout::BASE, value),
+            offset if offset >= vout::BASE && offset <= vout::BASE + 0xFF => self.vout.write32(offset - vout::BASE, value),
             _ => {
                 log::warn!("MACE write32: unimplemented offset 0x{:08X} = 0x{:08X}", offset, value);
             }
@@ -465,7 +463,7 @@ impl EnetState {
             enet::MII_CTRL => self.mii_ctrl,
             enet::MII_DATA => self.mii_data,
             enet::MII_ADDR => self.mii_addr,
-            enet::STATS_BASE..=enet::STATS_BASE + 0x7C => {
+            offset if offset >= enet::STATS_BASE && offset <= enet::STATS_BASE + 0x7C => {
                 let idx = ((offset - enet::STATS_BASE) / 4) as usize;
                 if idx < self.stats.len() { self.stats[idx] } else { 0 }
             }
@@ -495,7 +493,7 @@ impl EnetState {
             enet::MII_CTRL => self.mii_ctrl = value,
             enet::MII_DATA => self.mii_data = value,
             enet::MII_ADDR => self.mii_addr = value,
-            enet::STATS_BASE..=enet::STATS_BASE + 0x7C => {
+            offset if offset >= enet::STATS_BASE && offset <= enet::STATS_BASE + 0x7C => {
                 let idx = ((offset - enet::STATS_BASE) / 4) as usize;
                 if idx < self.stats.len() { self.stats[idx] = value; }
             }
@@ -519,11 +517,11 @@ pub struct PerifState {
 impl PerifState {
     pub fn read32(&self, offset: u32) -> u32 {
         match offset {
-            perif::audio::BASE..=perif::audio::BASE + 0xFF => self.audio.read32(offset - perif::audio::BASE),
-            perif::isa::BASE..=perif::isa::BASE + 0xFF => self.isa.read32(offset - perif::isa::BASE),
-            perif::kbdms::BASE..=perif::kbdms::BASE + 0xFF => self.kbdms.read32(offset - perif::kbdms::BASE),
-            perif::i2c::BASE..=perif::i2c::BASE + 0xFF => self.i2c.read32(offset - perif::i2c::BASE),
-            perif::ustmsc::BASE..=perif::ustmsc::BASE + 0xFF => self.ustmsc.read32(offset - perif::ustmsc::BASE),
+            offset if offset >= perif::audio::BASE && offset <= perif::audio::BASE + 0xFF => self.audio.read32(offset - perif::audio::BASE),
+            offset if offset >= perif::isa::BASE && offset <= perif::isa::BASE + 0xFF => self.isa.read32(offset - perif::isa::BASE),
+            offset if offset >= perif::kbdms::BASE && offset <= perif::kbdms::BASE + 0xFF => self.kbdms.read32(offset - perif::kbdms::BASE),
+            offset if offset >= perif::i2c::BASE && offset <= perif::i2c::BASE + 0xFF => self.i2c.read32(offset - perif::i2c::BASE),
+            offset if offset >= perif::ustmsc::BASE && offset <= perif::ustmsc::BASE + 0xFF => self.ustmsc.read32(offset - perif::ustmsc::BASE),
             _ => {
                 log::warn!("PERIF read32: unimplemented offset 0x{:05X}", offset);
                 0
@@ -533,11 +531,11 @@ impl PerifState {
 
     pub fn write32(&mut self, offset: u32, value: u32) {
         match offset {
-            perif::audio::BASE..=perif::audio::BASE + 0xFF => self.audio.write32(offset - perif::audio::BASE, value),
-            perif::isa::BASE..=perif::isa::BASE + 0xFF => self.isa.write32(offset - perif::isa::BASE, value),
-            perif::kbdms::BASE..=perif::kbdms::BASE + 0xFF => self.kbdms.write32(offset - perif::kbdms::BASE, value),
-            perif::i2c::BASE..=perif::i2c::BASE + 0xFF => self.i2c.write32(offset - perif::i2c::BASE, value),
-            perif::ustmsc::BASE..=perif::ustmsc::BASE + 0xFF => self.ustmsc.write32(offset - perif::ustmsc::BASE, value),
+            offset if offset >= perif::audio::BASE && offset <= perif::audio::BASE + 0xFF => self.audio.write32(offset - perif::audio::BASE, value),
+            offset if offset >= perif::isa::BASE && offset <= perif::isa::BASE + 0xFF => self.isa.write32(offset - perif::isa::BASE, value),
+            offset if offset >= perif::kbdms::BASE && offset <= perif::kbdms::BASE + 0xFF => self.kbdms.write32(offset - perif::kbdms::BASE, value),
+            offset if offset >= perif::i2c::BASE && offset <= perif::i2c::BASE + 0xFF => self.i2c.write32(offset - perif::i2c::BASE, value),
+            offset if offset >= perif::ustmsc::BASE && offset <= perif::ustmsc::BASE + 0xFF => self.ustmsc.write32(offset - perif::ustmsc::BASE, value),
             _ => {
                 log::warn!("PERIF write32: unimplemented offset 0x{:05X} = 0x{:08X}", offset, value);
             }
@@ -745,12 +743,12 @@ pub struct IsaExtState {
 impl IsaExtState {
     pub fn read32(&self, offset: u32) -> u32 {
         match offset {
-            isa_ext::epp::BASE..=isa_ext::epp::BASE + 0xFF => self.epp.read32(offset - isa_ext::epp::BASE),
-            isa_ext::ecp::BASE..=isa_ext::ecp::BASE + 0xFF => self.ecp.read32(offset - isa_ext::ecp::BASE),
-            isa_ext::uart1::BASE..=isa_ext::uart1::BASE + 0xFF => self.uart1.read32(offset - isa_ext::uart1::BASE),
-            isa_ext::uart2::BASE..=isa_ext::uart2::BASE + 0xFF => self.uart2.read32(offset - isa_ext::uart2::BASE),
-            isa_ext::rtc::BASE..=isa_ext::rtc::BASE + 0xFF => self.rtc.read32(offset - isa_ext::rtc::BASE),
-            isa_ext::game::BASE..=isa_ext::game::BASE + 0xFF => self.game.read32(offset - isa_ext::game::BASE),
+            offset if offset >= isa_ext::epp::BASE && offset <= isa_ext::epp::BASE + 0xFF => self.epp.read32(offset - isa_ext::epp::BASE),
+            offset if offset >= isa_ext::ecp::BASE && offset <= isa_ext::ecp::BASE + 0xFF => self.ecp.read32(offset - isa_ext::ecp::BASE),
+            offset if offset >= isa_ext::uart1::BASE && offset <= isa_ext::uart1::BASE + 0xFF => self.uart1.read32(offset - isa_ext::uart1::BASE),
+            offset if offset >= isa_ext::uart2::BASE && offset <= isa_ext::uart2::BASE + 0xFF => self.uart2.read32(offset - isa_ext::uart2::BASE),
+            offset if offset >= isa_ext::rtc::BASE && offset <= isa_ext::rtc::BASE + 0xFF => self.rtc.read32(offset - isa_ext::rtc::BASE),
+            offset if offset >= isa_ext::game::BASE && offset <= isa_ext::game::BASE + 0xFF => self.game.read32(offset - isa_ext::game::BASE),
             _ => {
                 log::warn!("ISA_EXT read32: unimplemented offset 0x{:05X}", offset);
                 0
@@ -760,12 +758,12 @@ impl IsaExtState {
 
     pub fn write32(&mut self, offset: u32, value: u32) {
         match offset {
-            isa_ext::epp::BASE..=isa_ext::epp::BASE + 0xFF => self.epp.write32(offset - isa_ext::epp::BASE, value),
-            isa_ext::ecp::BASE..=isa_ext::ecp::BASE + 0xFF => self.ecp.write32(offset - isa_ext::ecp::BASE, value),
-            isa_ext::uart1::BASE..=isa_ext::uart1::BASE + 0xFF => self.uart1.write32(offset - isa_ext::uart1::BASE, value),
-            isa_ext::uart2::BASE..=isa_ext::uart2::BASE + 0xFF => self.uart2.write32(offset - isa_ext::uart2::BASE, value),
-            isa_ext::rtc::BASE..=isa_ext::rtc::BASE + 0xFF => self.rtc.write32(offset - isa_ext::rtc::BASE, value),
-            isa_ext::game::BASE..=isa_ext::game::BASE + 0xFF => self.game.write32(offset - isa_ext::game::BASE, value),
+            offset if offset >= isa_ext::epp::BASE && offset <= isa_ext::epp::BASE + 0xFF => self.epp.write32(offset - isa_ext::epp::BASE, value),
+            offset if offset >= isa_ext::ecp::BASE && offset <= isa_ext::ecp::BASE + 0xFF => self.ecp.write32(offset - isa_ext::ecp::BASE, value),
+            offset if offset >= isa_ext::uart1::BASE && offset <= isa_ext::uart1::BASE + 0xFF => self.uart1.write32(offset - isa_ext::uart1::BASE, value),
+            offset if offset >= isa_ext::uart2::BASE && offset <= isa_ext::uart2::BASE + 0xFF => self.uart2.write32(offset - isa_ext::uart2::BASE, value),
+            offset if offset >= isa_ext::rtc::BASE && offset <= isa_ext::rtc::BASE + 0xFF => self.rtc.write32(offset - isa_ext::rtc::BASE, value),
+            offset if offset >= isa_ext::game::BASE && offset <= isa_ext::game::BASE + 0xFF => self.game.write32(offset - isa_ext::game::BASE, value),
             _ => {
                 log::warn!("ISA_EXT write32: unimplemented offset 0x{:05X} = 0x{:08X}", offset, value);
             }
@@ -871,18 +869,18 @@ impl UartState {
         // NS16550 registers are 8-bit but accessed at 32-bit aligned addresses on O2
         let reg_offset = offset & 0x1F; // Only lower 5 bits used
         match reg_offset {
-            isa_ext::uart1::RBR | isa_ext::uart2::RBR => {
+            0x00 => { // RBR (read) / THR (write) / DLL (DLAB=1)
                 if self.dlab { self.dll as u32 } else { self.rbr as u32 }
             }
-            isa_ext::uart1::IER | isa_ext::uart2::IER => {
+            0x04 => { // IER / DLM (DLAB=1)
                 if self.dlab { self.dlm as u32 } else { self.ier as u32 }
             }
-            isa_ext::uart1::IIR | isa_ext::uart2::IIR => self.iir as u32,
-            isa_ext::uart1::LCR | isa_ext::uart2::LCR => self.lcr as u32,
-            isa_ext::uart1::MCR | isa_ext::uart2::MCR => self.mcr as u32,
-            isa_ext::uart1::LSR | isa_ext::uart2::LSR => self.lsr as u32,
-            isa_ext::uart1::MSR | isa_ext::uart2::MSR => self.msr as u32,
-            isa_ext::uart1::SCR | isa_ext::uart2::SCR => self.scr as u32,
+            0x08 => self.iir as u32, // IIR (read) / FCR (write)
+            0x0C => self.lcr as u32, // LCR
+            0x10 => self.mcr as u32, // MCR
+            0x14 => self.lsr as u32, // LSR
+            0x18 => self.msr as u32, // MSR
+            0x1C => self.scr as u32, // SCR
             _ => {
                 log::warn!("UART read32: unimplemented offset 0x{:04X}", offset);
                 0
@@ -894,19 +892,19 @@ impl UartState {
         let reg_offset = offset & 0x1F;
         let val = value as u8;
         match reg_offset {
-            isa_ext::uart1::THR | isa_ext::uart2::THR => {
+            0x00 => { // THR (write) / DLL (DLAB=1)
                 if self.dlab { self.dll = val; } else { self.thr = val; }
             }
-            isa_ext::uart1::IER | isa_ext::uart2::IER => {
+            0x04 => { // IER / DLM (DLAB=1)
                 if self.dlab { self.dlm = val; } else { self.ier = val; }
             }
-            isa_ext::uart1::FCR | isa_ext::uart2::FCR => self.fcr = val,
-            isa_ext::uart1::LCR | isa_ext::uart2::LCR => {
+            0x08 => self.fcr = val, // FCR
+            0x0C => { // LCR
                 self.lcr = val;
                 self.dlab = (val & 0x80) != 0; // DLAB is bit 7
             }
-            isa_ext::uart1::MCR | isa_ext::uart2::MCR => self.mcr = val,
-            isa_ext::uart1::SCR | isa_ext::uart2::SCR => self.scr = val,
+            0x10 => self.mcr = val, // MCR
+            0x1C => self.scr = val, // SCR
             _ => {
                 log::warn!("UART write32: unimplemented offset 0x{:04X} = 0x{:08X}", offset, value);
             }
@@ -915,9 +913,15 @@ impl UartState {
 }
 
 /// RTC (DS12887) state.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct RtcState {
     pub regs: [u8; 128], // 0x00-0x7F
+}
+
+impl Default for RtcState {
+    fn default() -> Self {
+        Self { regs: [0; 128] }
+    }
 }
 
 impl RtcState {
