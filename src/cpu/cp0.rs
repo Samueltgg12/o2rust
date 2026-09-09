@@ -166,12 +166,120 @@ impl Cp0 {
 
     /// Read a CP0 register.
     pub fn read(&self, reg: Cp0Reg) -> u32 {
-        self.regs[reg as usize]
+        match reg {
+            Cp0Reg::Index => self.index,
+            Cp0Reg::Random => self.random,
+            Cp0Reg::Wired => self.wired,
+            Cp0Reg::EntryHi => self.tlb[self.index as usize].entry_hi,
+            Cp0Reg::EntryLo0 => self.tlb[self.index as usize].entry_lo0,
+            Cp0Reg::EntryLo1 => self.tlb[self.index as usize].entry_lo1,
+            Cp0Reg::PageMask => self.tlb[self.index as usize].page_mask,
+            _ => self.regs[reg as usize],
+        }
     }
 
     /// Write a CP0 register.
     pub fn write(&mut self, reg: Cp0Reg, value: u32) {
-        self.regs[reg as usize] = value;
+        match reg {
+            Cp0Reg::Index => {
+                self.index = value & 0x3F; // 6 bits for 48 entries
+            }
+            Cp0Reg::Random => {
+                self.random = value & 0x3F;
+            }
+            Cp0Reg::Wired => {
+                self.wired = value & 0x3F;
+                if self.wired > 48 {
+                    self.wired = 48;
+                }
+                if self.random < self.wired {
+                    self.random = self.wired;
+                }
+            }
+            Cp0Reg::EntryHi => {
+                self.tlb[self.index as usize].entry_hi = value;
+            }
+            Cp0Reg::EntryLo0 => {
+                self.tlb[self.index as usize].entry_lo0 = value;
+            }
+            Cp0Reg::EntryLo1 => {
+                self.tlb[self.index as usize].entry_lo1 = value;
+            }
+            Cp0Reg::PageMask => {
+                self.tlb[self.index as usize].page_mask = value;
+            }
+            _ => {
+                self.regs[reg as usize] = value;
+            }
+        }
+    }
+
+    /// TLBR - TLB Read Indexed
+    /// Reads the TLB entry at Index into EntryHi, EntryLo0, EntryLo1, PageMask.
+    pub fn tlb_read_indexed(&mut self) {
+        let idx = (self.index & 0x3F) as usize;
+        let entry = self.tlb[idx];
+        self.regs[Cp0Reg::EntryHi as usize] = entry.entry_hi;
+        self.regs[Cp0Reg::EntryLo0 as usize] = entry.entry_lo0;
+        self.regs[Cp0Reg::EntryLo1 as usize] = entry.entry_lo1;
+        self.regs[Cp0Reg::PageMask as usize] = entry.page_mask;
+    }
+
+    /// TLBWI - TLB Write Indexed
+    /// Writes EntryHi, EntryLo0, EntryLo1, PageMask into the TLB entry at Index.
+    pub fn tlb_write_indexed(&mut self) {
+        let idx = (self.index & 0x3F) as usize;
+        self.tlb[idx].entry_hi = self.regs[Cp0Reg::EntryHi as usize];
+        self.tlb[idx].entry_lo0 = self.regs[Cp0Reg::EntryLo0 as usize];
+        self.tlb[idx].entry_lo1 = self.regs[Cp0Reg::EntryLo1 as usize];
+        self.tlb[idx].page_mask = self.regs[Cp0Reg::PageMask as usize];
+    }
+
+    /// TLBWR - TLB Write Random
+    /// Writes EntryHi, EntryLo0, EntryLo1, PageMask into the TLB entry at Random.
+    pub fn tlb_write_random(&mut self) {
+        let idx = (self.random & 0x3F) as usize;
+        self.tlb[idx].entry_hi = self.regs[Cp0Reg::EntryHi as usize];
+        self.tlb[idx].entry_lo0 = self.regs[Cp0Reg::EntryLo0 as usize];
+        self.tlb[idx].entry_lo1 = self.regs[Cp0Reg::EntryLo1 as usize];
+        self.tlb[idx].page_mask = self.regs[Cp0Reg::PageMask as usize];
+        // Update Random register (pseudo-random decrement)
+        self.update_random();
+    }
+
+    /// TLBP - TLB Probe
+    /// Searches the TLB for an entry matching EntryHi.
+    /// If found, loads its index into Index register.
+    /// If not found, sets the P bit (bit 31) in Index.
+    pub fn tlb_probe(&mut self) {
+        let entry_hi = self.regs[Cp0Reg::EntryHi as usize];
+        let vpn2 = entry_hi & 0xFFFF_E000; // VPN2 is bits 31..13
+        let asid = entry_hi & 0xFF; // ASID is bits 7..0
+
+        for i in 0..48 {
+            let tlb_entry = self.tlb[i];
+            let tlb_vpn2 = tlb_entry.entry_hi & 0xFFFF_E000;
+            let tlb_asid = tlb_entry.entry_hi & 0xFF;
+            let tlb_g = (tlb_entry.entry_lo0 & 1) | (tlb_entry.entry_lo1 & 1); // G bit from either EntryLo
+
+            // Match if VPN2 matches and (ASID matches or G bit is set)
+            if tlb_vpn2 == vpn2 && (tlb_asid == asid || tlb_g != 0) {
+                self.index = i as u32;
+                return;
+            }
+        }
+        // Not found: set P bit (bit 31)
+        self.index = 0x8000_0000;
+    }
+
+    /// Update the Random register (pseudo-random decrement).
+    /// Random cycles between Wired and 47 (inclusive).
+    fn update_random(&mut self) {
+        if self.random > self.wired {
+            self.random -= 1;
+        } else {
+            self.random = 47;
+        }
     }
 
     /// The Status register.
@@ -270,9 +378,10 @@ impl Cp0 {
         self.epc()
     }
 
-    /// Increment the Count register (called once per cycle).
+    /// Increment the Count register and update Random (called once per cycle).
     pub fn tick(&mut self) {
         self.regs[Cp0Reg::Count as usize] = self.regs[Cp0Reg::Count as usize].wrapping_add(1);
+        self.update_random();
     }
 }
 

@@ -144,7 +144,12 @@ mod tests {
     #[test]
     fn checksum_is_two_complement() {
         // A single word 0x12345678: checksum = -0x12345678.
-        let bytes = [0x12, 0x34, 0x56, 0x78];
+        // Need at least 0x1000 bytes for Prom::from_bytes
+        let mut bytes = vec![0u8; 0x1000];
+        bytes[0] = 0x12;
+        bytes[1] = 0x34;
+        bytes[2] = 0x56;
+        bytes[3] = 0x78;
         let prom = Prom::from_bytes(&bytes).unwrap();
         assert_eq!(prom.checksum(), 0x1234_5678u32.wrapping_neg());
     }

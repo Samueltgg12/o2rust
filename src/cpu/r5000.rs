@@ -9,7 +9,7 @@
 //! trait, so it can be driven by the system bus or a test harness.
 
 use super::{Cp0, CpuState};
-use crate::cpu::cp0::{cause, status, Cp0Reg, ExceptionCode};
+use crate::cpu::cp0::{Cp0Reg, ExceptionCode};
 use crate::log;
 
 /// Memory access interface used by the CPU to fetch instructions and read/write
@@ -1006,7 +1006,7 @@ mod tests {
     #[test]
     fn executes_addiu_and_lui() {
         let mut cpu = R5000::new();
-        let mut mem = TestMem::new(0x1000);
+        let mut mem = TestMem::new(0x2000);
         cpu.state.pc = 0x1000;
 
         // ADDIU $t0, $zero, 0x1234  => 0x2408_1234
@@ -1026,7 +1026,7 @@ mod tests {
     #[test]
     fn executes_jump_and_link() {
         let mut cpu = R5000::new();
-        let mut mem = TestMem::new(0x1000);
+        let mut mem = TestMem::new(0x2000);
         cpu.state.pc = 0x1000;
 
         // JAL 0x2000  => 0x0c00_0800
