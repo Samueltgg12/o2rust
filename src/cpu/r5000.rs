@@ -175,6 +175,92 @@ impl R5000 {
         }
     }
 
+    /// Execute the CACHE instruction (opcode 0x2f).
+    ///
+    /// The CACHE instruction performs cache operations on the primary instruction
+    /// cache, primary data cache, or secondary cache. The operation is encoded
+    /// in bits 20:16 of the instruction:
+    /// - bits 17:16 (op[1:0]): target cache (0=I-cache, 1=D-cache, 2=Secondary, 3=D-cache)
+    /// - bits 20:18 (op[4:2]): operation
+    ///   0 = Index_Invalidate / Index_Writeback_Invalidate / Flash
+    ///   1 = Index_Load_Tag
+    ///   2 = Index_Store_Tag
+    ///   3 = Create_Dirty_Exclusive
+    ///   4 = Hit_Invalidate
+    ///   5 = Fill / Hit_Writeback_Invalidate / Page_Invalidate
+    ///   6 = Hit_Writeback
+    ///   7 = Hit_Writeback (alternate)
+    ///
+    /// The address is computed as: base_register + sign_extended_offset
+    fn execute_cache(&mut self, instr: u32, _mem: &mut dyn MemoryAccess) {
+        let rs = ((instr >> 21) & 0x1f) as usize;
+        let offset = (instr & 0xffff) as i16 as i32 as u32;
+        let base = self.state.gpr(rs) as u32;
+        let addr = base.wrapping_add(offset);
+
+        // Extract cache operation (bits 20:16)
+        let op = (instr >> 16) & 0x1f;
+        let target_cache = op & 0x3;        // bits 1:0
+        let operation = (op >> 2) & 0x7;    // bits 4:2
+
+        log::debug_msg(&format!(
+            "CACHE: op=0x{:02x}, target_cache={}, operation={}, addr=0x{:08x}, base_reg=${}, offset=0x{:04x}",
+            op, target_cache, operation, addr, rs, offset
+        ));
+
+        // For now, implement as no-op with logging. Full cache simulation
+        // requires a cache model which is not yet implemented.
+        // The PROM uses CACHE instructions for cache initialization and
+        // management during boot.
+        match (target_cache, operation) {
+            // Index operations - use address to index into cache
+            (0, 0) => { /* Index_Invalidate_I */ }
+            (1, 0) => { /* Index_Writeback_Invalidate_D */ }
+            (2, 0) => { /* Index_Writeback_Invalidate_S / Flash */ }
+            (3, 0) => { /* Index_Writeback_Invalidate_D (alt) */ }
+
+            // Index_Load_Tag - load cache tag into CP0 TagLo/TagHi
+            (0, 1) => { /* Index_Load_Tag_I */ }
+            (1, 1) => { /* Index_Load_Tag_D */ }
+            (2, 1) => { /* Index_Load_Tag_S */ }
+            (3, 1) => { /* Index_Load_Tag_D (alt) */ }
+
+            // Index_Store_Tag - store CP0 TagLo/TagHi into cache tag
+            (0, 2) => { /* Index_Store_Tag_I */ }
+            (1, 2) => { /* Index_Store_Tag_D */ }
+            (2, 2) => { /* Index_Store_Tag_S */ }
+            (3, 2) => { /* Index_Store_Tag_D (alt) */ }
+
+            // Create_Dirty_Exclusive
+            (1, 3) => { /* Create_Dirty_Exclusive_D */ }
+            (3, 3) => { /* Create_Dirty_Exclusive_D (alt) */ }
+
+            // Hit operations - use address to check for cache hit
+            (0, 4) => { /* Hit_Invalidate_I */ }
+            (1, 4) => { /* Hit_Invalidate_D */ }
+            (2, 4) => { /* Hit_Invalidate_S */ }
+            (3, 4) => { /* Hit_Invalidate_D (alt) */ }
+
+            (1, 5) => { /* Hit_Writeback_Invalidate_D / Fill */ }
+            (2, 5) => { /* Hit_Writeback_Invalidate_S / Page_Invalidate */ }
+            (3, 5) => { /* Hit_Writeback_Invalidate_D (alt) */ }
+
+            (1, 6) => { /* Hit_Writeback_D */ }
+            (2, 6) => { /* Hit_Writeback_S */ }
+            (3, 6) => { /* Hit_Writeback_D (alt) */ }
+
+            (1, 7) => { /* Hit_Writeback_D (alt) */ }
+            (3, 7) => { /* Hit_Writeback_D (alt) */ }
+
+            _ => {
+                log::warn_msg(&format!(
+                    "Unknown CACHE operation: target_cache={}, operation={} at PC 0x{:08x}",
+                    target_cache, operation, self.state.pc
+                ));
+            }
+        }
+    }
+
     // === SPECIAL (opcode 0x00) ===
     fn execute_special(&mut self, instr: u32, _mem: &mut dyn MemoryAccess) {
         let funct = instr & 0x3f;
