@@ -1,0 +1,1 @@
+This CPP (C++ File) File is a **Golden Mine** for us to get and implement MIPS III/IV Opcodes for the cores and interpreter. It came from a PS1/PS2 MIPSIII/IV Assembler by the way so it's **Gold** For us.
