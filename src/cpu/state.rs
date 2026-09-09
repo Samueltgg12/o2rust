@@ -30,6 +30,8 @@ pub struct CpuState {
     pub lladdr: u32,
     /// Whether the next instruction is a branch delay slot.
     pub in_delay_slot: bool,
+    /// Shift Amount register (MIPS IV MFSA/MTSA instructions).
+    pub sa: u64,
 }
 
 impl Default for CpuState {
@@ -46,6 +48,7 @@ impl Default for CpuState {
             llbit: false,
             lladdr: 0,
             in_delay_slot: false,
+            sa: 0,
         }
     }
 }
@@ -57,6 +60,7 @@ impl CpuState {
         // The PROM sets up a stack in kseg0; pre-seed a sane default.
         self.gpr[29] = 0x8000_0000; // $sp
         self.gpr[28] = 0x8000_0000; // $gp
+        self.sa = 0;
     }
 
     /// Read a GPR, forcing `$0` to always return zero.

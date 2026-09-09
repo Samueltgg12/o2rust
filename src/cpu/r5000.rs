@@ -459,8 +459,8 @@ impl R5000 {
                 // MADD (MIPS IV) - Multiply-Add
                 let a = self.state.gpr(rs) as i64;
                 let b = self.state.gpr(rt) as i64;
-                let result = a.wrapping_mul(b);
-                let (new_lo, new_hi) = self.madd_maddu(result);
+                let result = a.wrapping_mul(b) as i128;
+                let (new_lo, new_hi) = self.madd_maddu(result, true);
                 self.state.lo = new_lo;
                 self.state.hi = new_hi;
             }
@@ -468,8 +468,8 @@ impl R5000 {
                 // MADDU (MIPS IV) - Multiply-Add Unsigned
                 let a = self.state.gpr(rs) as u64;
                 let b = self.state.gpr(rt) as u64;
-                let result = a.wrapping_mul(b);
-                let (new_lo, new_hi) = self.madd_maddu(result as i64);
+                let result = a.wrapping_mul(b) as i128;
+                let (new_lo, new_hi) = self.madd_maddu(result, false);
                 self.state.lo = new_lo;
                 self.state.hi = new_hi;
             }
@@ -490,7 +490,7 @@ impl R5000 {
                 let b = self.state.gpr(rt) as i64;
                 let (result, overflow) = a.overflowing_add(b);
                 if overflow {
-                    self.exception(ExceptionCode::Ovf);
+                    self.exception(ExceptionCode::Overflow);
                 } else {
                     self.state.set_gpr(rd, result as u64);
                 }
@@ -506,7 +506,7 @@ impl R5000 {
                 let b = self.state.gpr(rt) as i64;
                 let (result, overflow) = a.overflowing_sub(b);
                 if overflow {
-                    self.exception(ExceptionCode::Ovf);
+                    self.exception(ExceptionCode::Overflow);
                 } else {
                     self.state.set_gpr(rd, result as u64);
                 }
@@ -1064,19 +1064,19 @@ impl R5000 {
                 match funct {
                     0x01 => {
                         // TLBR - TLB Read
-                        self.cp0.tlbr();
+                        self.cp0.tlb_read_indexed();
                     }
                     0x02 => {
                         // TLBWI - TLB Write Index
-                        self.cp0.tlbwi();
+                        self.cp0.tlb_write_indexed();
                     }
                     0x06 => {
                         // TLBWR - TLB Write Random
-                        self.cp0.tlbwr();
+                        self.cp0.tlb_write_random();
                     }
                     0x08 => {
                         // TLBP - TLB Probe
-                        self.cp0.tlbp();
+                        self.cp0.tlb_probe();
                     }
                     0x18 => {
                         // ERET - Exception Return
@@ -1110,19 +1110,29 @@ impl R5000 {
         let rs = (instr >> 21) & 0x1f;
         let rt = ((instr >> 16) & 0x1f) as usize;
         let fs = ((instr >> 11) & 0x1f) as usize;
+        let nd = (instr >> 16) & 0x1f; // For BC1: nd = condition bit
 
         match rs {
             0x00 => {
-                // MFC1
+                // MFC1 - Move From Coprocessor 1 (32-bit)
                 let v = self.state.fpr[fs] as u32;
                 self.state.set_gpr(rt, v as u64);
             }
+            0x01 => {
+                // DMFC1 - Doubleword Move From Coprocessor 1 (64-bit, MIPS III)
+                let v = self.state.fpr[fs];
+                self.state.set_gpr(rt, v);
+            }
             0x04 => {
-                // MTC1
+                // MTC1 - Move To Coprocessor 1 (32-bit)
                 self.state.fpr[fs] = self.state.gpr(rt) as u32 as u64;
             }
+            0x05 => {
+                // DMTC1 - Doubleword Move To Coprocessor 1 (64-bit, MIPS III)
+                self.state.fpr[fs] = self.state.gpr(rt);
+            }
             0x02 => {
-                // CFC1
+                // CFC1 - Move Control From Coprocessor 1
                 let v = if fs == 0 {
                     self.state.fcr0
                 } else if fs == 31 {
@@ -1133,12 +1143,27 @@ impl R5000 {
                 self.state.set_gpr(rt, v as u64);
             }
             0x06 => {
-                // CTC1
+                // CTC1 - Move Control To Coprocessor 1
                 let v = self.state.gpr(rt) as u32;
                 if fs == 0 {
                     self.state.fcr0 = v;
                 } else if fs == 31 {
                     self.state.fcr31 = v;
+                }
+            }
+            0x08 => {
+                // BC1 - Branch on FPU Condition (MIPS IV)
+                // nd[4:1] = condition code, nd[0] = tf (true/false)
+                let cc = (nd >> 1) & 0x7; // condition code (0-7)
+                let tf = nd & 1; // true/false
+                let imm = (instr & 0xffff) as i16 as i32;
+                
+                // Get condition bit from FCR31
+                let cond_bit = (self.state.fcr31 >> (23 + cc)) & 1;
+                let take_branch = (cond_bit != 0) == (tf != 0);
+                
+                if take_branch {
+                    self.branch_offset(imm);
                 }
             }
             0x10..=0x1f => {
@@ -1181,7 +1206,8 @@ impl R5000 {
                 self.fpu_l(instr, ft, fs, fd, funct);
             }
             0x18 => {
-                // PS - Paired Single (not implemented, treat as reserved)
+                // PS - Paired Single (MIPS IV extension, not fully implemented)
+                // For now, treat as reserved instruction
                 log::warn_msg(&format!(
                     "Paired Single FPU fmt not implemented at PC 0x{:08x}",
                     self.state.pc
@@ -1390,6 +1416,26 @@ impl R5000 {
     fn exception(&mut self, code: ExceptionCode) {
         let vector = self.cp0.take_exception(&mut self.state, code);
         self.state.next_pc = vector;
+    }
+
+    /// MADD/MADDU helper (MIPS IV): multiply-add to HI/LO.
+    /// Takes the product (already computed) and adds it to HI/LO.
+    /// signed: true for MADD (signed), false for MADDU (unsigned).
+    /// Returns (new_lo, new_hi).
+    fn madd_maddu(&mut self, product: i128, signed: bool) -> (u64, u64) {
+        let (hi, lo) = if signed {
+            let sum = (self.state.hi as i128) << 64 | (self.state.lo as i128 & 0xFFFF_FFFF_FFFF_FFFF);
+            let result = sum + product;
+            ((result >> 64) as u64, (result & 0xFFFF_FFFF_FFFF_FFFF) as u64)
+        } else {
+            let sum = (self.state.hi as u128) << 64 | (self.state.lo as u128 & 0xFFFF_FFFF_FFFF_FFFF);
+            let result = sum + product as u128;
+            ((result >> 64) as u64, (result & 0xFFFF_FFFF_FFFF_FFFF) as u64)
+        };
+
+        self.state.hi = hi;
+        self.state.lo = lo;
+        (lo, hi)
     }
 
     /// Check for pending interrupts and take one if enabled.
