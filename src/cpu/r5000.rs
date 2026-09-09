@@ -166,7 +166,9 @@ impl R5000 {
             0x2e => self.store_right(instr, mem),
             0x2f => self.execute_cache(instr, mem),
             0x30 => self.load(instr, mem, 4, true), // LL (simplified)
+            0x37 => self.load(instr, mem, 8, true), // LD (Load Doubleword, 64-bit)
             0x38 => self.store(instr, mem, 4),      // SC (simplified)
+            0x3f => self.store(instr, mem, 8),      // SD (Store Doubleword, 64-bit)
             0x31 => self.load_fp(instr, mem),
             0x39 => self.store_fp(instr, mem),
             _ => {
@@ -584,6 +586,8 @@ impl R5000 {
         let value = match size {
             1 => mem.read8(addr) as u64,
             2 => mem.read16(addr) as u64,
+            4 => mem.read32(addr) as u64,
+            8 => mem.read64(addr),
             _ => mem.read32(addr) as u64,
         };
 
@@ -591,6 +595,8 @@ impl R5000 {
             match size {
                 1 => (value as u8 as i8 as i64) as u64,
                 2 => (value as u16 as i16 as i64) as u64,
+                4 => (value as u32 as i32 as i64) as u64,
+                8 => value, // 64-bit is already full width
                 _ => value,
             }
         } else {
@@ -636,6 +642,8 @@ impl R5000 {
         match size {
             1 => mem.write8(addr, value as u8),
             2 => mem.write16(addr, value as u16),
+            4 => mem.write32(addr, value as u32),
+            8 => mem.write64(addr, value),
             _ => mem.write32(addr, value as u32),
         }
     }
