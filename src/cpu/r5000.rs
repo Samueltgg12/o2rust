@@ -387,6 +387,36 @@ impl R5000 {
                     self.state.hi = (a % b) as u64;
                 }
             }
+            0x16 => {
+                // DSRLV - Doubleword Shift Right Logical Variable (MIPS III)
+                let s = (self.state.gpr(rs) & 0x3f) as u32;
+                let v = self.state.gpr(rt) >> s;
+                self.state.set_gpr(rd, v);
+            }
+            0x17 => {
+                // DSRAV - Doubleword Shift Right Arithmetic Variable (MIPS III)
+                let s = (self.state.gpr(rs) & 0x3f) as u32;
+                let v = ((self.state.gpr(rt) as i64) >> s) as u64;
+                self.state.set_gpr(rd, v);
+            }
+            0x1e => {
+                // DDIV - Doubleword Divide (MIPS III)
+                let a = self.state.gpr(rs) as i64;
+                let b = self.state.gpr(rt) as i64;
+                if b != 0 {
+                    self.state.lo = (a.wrapping_div(b)) as u64;
+                    self.state.hi = (a.wrapping_rem(b)) as u64;
+                }
+            }
+            0x1f => {
+                // DDIVU - Doubleword Divide Unsigned (MIPS III)
+                let a = self.state.gpr(rs);
+                let b = self.state.gpr(rt);
+                if b != 0 {
+                    self.state.lo = a / b;
+                    self.state.hi = a % b;
+                }
+            }
             0x20 => {
                 // ADD
                 let v = self.state.gpr(rs).wrapping_add(self.state.gpr(rt));
@@ -667,6 +697,42 @@ impl R5000 {
                 } else {
                     // Skip delay slot
                     self.state.pc = self.state.pc.wrapping_add(4);
+                }
+            }
+            0x08 => {
+                // TGEI - Trap if Greater Than or Equal Immediate (MIPS III)
+                if (self.state.gpr(rs) as i64) >= (imm as i64) {
+                    self.exception(ExceptionCode::Trap);
+                }
+            }
+            0x09 => {
+                // TGEIU - Trap if Greater Than or Equal Immediate Unsigned (MIPS III)
+                if self.state.gpr(rs) >= (imm as u32) as u64 {
+                    self.exception(ExceptionCode::Trap);
+                }
+            }
+            0x0a => {
+                // TLTI - Trap if Less Than Immediate (MIPS III)
+                if (self.state.gpr(rs) as i64) < (imm as i64) {
+                    self.exception(ExceptionCode::Trap);
+                }
+            }
+            0x0b => {
+                // TLTIU - Trap if Less Than Immediate Unsigned (MIPS III)
+                if self.state.gpr(rs) < (imm as u32) as u64 {
+                    self.exception(ExceptionCode::Trap);
+                }
+            }
+            0x0c => {
+                // TEQI - Trap if Equal Immediate (MIPS III)
+                if self.state.gpr(rs) == (imm as u32) as u64 {
+                    self.exception(ExceptionCode::Trap);
+                }
+            }
+            0x0e => {
+                // TNEI - Trap if Not Equal Immediate (MIPS III)
+                if self.state.gpr(rs) != (imm as u32) as u64 {
+                    self.exception(ExceptionCode::Trap);
                 }
             }
             _ => {
