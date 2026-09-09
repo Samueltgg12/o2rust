@@ -439,6 +439,27 @@ impl R5000 {
                     self.exception(ExceptionCode::Trap);
                 }
             }
+            0x3c => {
+                // DSLL32 - Doubleword Shift Left Logical + 32 (MIPS IV)
+                // Shift amount = shamt + 32 (range 32-63)
+                let shift = (shamt + 32) as u32;
+                let v = self.state.gpr(rt) << shift;
+                self.state.set_gpr(rd, v);
+            }
+            0x3e => {
+                // DSRL32 - Doubleword Shift Right Logical + 32 (MIPS IV)
+                // Shift amount = shamt + 32 (range 32-63)
+                let shift = (shamt + 32) as u32;
+                let v = self.state.gpr(rt) >> shift;
+                self.state.set_gpr(rd, v);
+            }
+            0x3f => {
+                // DSRA32 - Doubleword Shift Right Arithmetic + 32 (MIPS IV)
+                // Shift amount = shamt + 32 (range 32-63)
+                let shift = (shamt + 32) as u32;
+                let v = ((self.state.gpr(rt) as i64) >> shift) as u64;
+                self.state.set_gpr(rd, v);
+            }
             _ => {
                 log::warn_msg(&format!(
                     "Unimplemented SPECIAL funct 0x{funct:02x} at PC 0x{:08x}",
