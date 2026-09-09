@@ -160,7 +160,7 @@ impl R5000 {
             0x2a => self.store_left(instr, mem),
             0x2b => self.store(instr, mem, 4),
             0x2e => self.store_right(instr, mem),
-            0x2f => {} // CACHE — no-op for now
+            0x2f => self.execute_cache(instr, mem),
             0x30 => self.load(instr, mem, 4, true), // LL (simplified)
             0x38 => self.store(instr, mem, 4),      // SC (simplified)
             0x31 => self.load_fp(instr, mem),
