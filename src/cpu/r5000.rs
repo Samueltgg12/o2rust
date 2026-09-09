@@ -99,7 +99,14 @@ impl R5000 {
         self.state.next_pc = pc.wrapping_add(4);
         self.state.in_delay_slot = false;
 
-        self.execute(instr, mem);
+        // Handle branch likely nullification: if the previous branch likely
+        // was not taken, the delay slot instruction is nullified (treated as NOP).
+        if self.state.nullify_delay_slot {
+            self.state.nullify_delay_slot = false;
+            // Skip execution - treat as NOP
+        } else {
+            self.execute(instr, mem);
+        }
 
         // Commit the PC.
         self.state.pc = self.state.next_pc;
@@ -142,6 +149,8 @@ impl R5000 {
             0x05 => self.branch(instr, false, false),
             0x06 => self.branch_zero(instr, true, false),
             0x07 => self.branch_zero(instr, false, false),
+            0x14 => self.branch_zero(instr, true, true),   // BEQZL - Branch on Equal Zero Likely
+            0x15 => self.branch_zero(instr, false, true),  // BNEZL - Branch on Not Equal Zero Likely
             0x08 => self.addi(instr, true),
             0x09 => self.addi(instr, false),
             0x0a => self.slti(instr, true),
@@ -764,13 +773,16 @@ impl R5000 {
         }
     }
 
-    fn branch_zero(&mut self, instr: u32, lez: bool, _likely: bool) {
+    fn branch_zero(&mut self, instr: u32, lez: bool, likely: bool) {
         let rs = ((instr >> 21) & 0x1f) as usize;
         let imm = (instr & 0xffff) as i16 as i32;
         let val = self.state.gpr(rs) as i64;
         let take = if lez { val <= 0 } else { val > 0 };
         if take {
             self.branch_offset(imm);
+        } else if likely {
+            // Branch likely not taken: nullify the delay slot instruction
+            self.state.nullify_delay_slot = true;
         }
     }
 
@@ -1301,13 +1313,29 @@ impl R5000 {
             0x01 => fd_val - fs_val,      // SUB.S
             0x02 => fd_val * fs_val,      // MUL.S
             0x03 => fd_val / fs_val,      // DIV.S
+            0x04 => fd_val.sqrt(),        // SQRT.S
             0x05 => fd_val.abs(),         // ABS.S
-            0x06 => fd_val,         // MOV.S (just copy)
+            0x06 => fd_val,               // MOV.S
             0x07 => -fd_val,              // NEG.S
+            0x08 => fd_val.round() as f32, // ROUND.L.S (round to long)
+            0x09 => fd_val.trunc() as f32, // TRUNC.L.S (truncate to long)
+            0x0a => fd_val.ceil() as f32,  // CEIL.L.S (ceiling to long)
+            0x0b => fd_val.floor() as f32, // FLOOR.L.S (floor to long)
+            0x0c => fd_val.round() as f32, // ROUND.W.S (round to word)
+            0x0d => fd_val.trunc() as f32, // TRUNC.W.S (truncate to word)
+            0x0e => fd_val.ceil() as f32,  // CEIL.W.S (ceiling to word)
+            0x0f => fd_val.floor() as f32, // FLOOR.W.S (floor to word)
+            0x10 => 1.0 / fd_val,         // RECIP.S (reciprocal approximation)
+            0x11 => 1.0 / fd_val.sqrt(),  // RSQRT.S (reciprocal sqrt approximation)
             0x20 => {
                 // CVT.S.D - convert double to single
                 let d_val = f64::from_bits(self.state.fpr[fs] as u64);
                 d_val as f32
+            }
+            0x21 => {
+                // CVT.S.L - convert long to single
+                let l_val = self.state.fpr[fs] as i64;
+                l_val as f32
             }
             0x24 => {
                 // CVT.S.W - convert word to single

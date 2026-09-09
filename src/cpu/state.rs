@@ -30,6 +30,8 @@ pub struct CpuState {
     pub lladdr: u32,
     /// Whether the next instruction is a branch delay slot.
     pub in_delay_slot: bool,
+    /// Whether the delay slot instruction should be nullified (branch likely not taken).
+    pub nullify_delay_slot: bool,
     /// Shift Amount register (MIPS IV MFSA/MTSA instructions).
     pub sa: u64,
 }
@@ -48,6 +50,7 @@ impl Default for CpuState {
             llbit: false,
             lladdr: 0,
             in_delay_slot: false,
+            nullify_delay_slot: false,
             sa: 0,
         }
     }
@@ -61,6 +64,7 @@ impl CpuState {
         self.gpr[29] = 0x8000_0000; // $sp
         self.gpr[28] = 0x8000_0000; // $gp
         self.sa = 0;
+        self.nullify_delay_slot = false;
     }
 
     /// Read a GPR, forcing `$0` to always return zero.
