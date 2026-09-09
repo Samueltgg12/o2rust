@@ -804,14 +804,18 @@ impl R5000 {
             let result = rs_val.wrapping_add(imm as u64);
             // Check for overflow: (rs_val >= 0 && imm >= 0 && result < 0) || (rs_val < 0 && imm < 0 && result >= 0)
             let rs_sign = (rs_val >> 63) & 1;
-            let imm_sign = (imm >> 63) & 1;
+            let imm_sign = ((imm as u64) >> 63) & 1;
             let result_sign = (result >> 63) & 1;
             
             if rs_sign == imm_sign && rs_sign != result_sign {
-                // Overflow - trigger exception
-                self.state.cp0.cause = (self.state.cp0.cause & !0x7c) | (0x0c << 2); // Ovf exception code
-                self.state.cp0.epc = self.state.pc;
-                self.state.cp0.status = (self.state.cp0.status & !0x3f) | 0x01; // Set EXL bit
+                // Overflow - trigger exception using Cp0 API
+                let mut cause = self.cp0.cause() & !0x7c;
+                cause |= (0x0c << 2); // Ovf exception code
+                self.cp0.write(Cp0Reg::Cause, cause);
+                self.cp0.set_epc(self.state.pc as u32);
+                let mut status = self.cp0.status() & !0x3f;
+                status |= 0x01; // Set EXL bit
+                self.cp0.write(Cp0Reg::Status, status);
                 self.state.pc = 0x80000080; // Exception vector
                 return;
             }
