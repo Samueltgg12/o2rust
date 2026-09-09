@@ -13,7 +13,7 @@
 //! Register maps sourced from Linux `arch/mips/sgi-ip32/`, NetBSD `sys/arch/sgimips/`,
 //! and leaked IRIX source `stand/arcs/`.
 
-use crate::memory::MemoryAccess;
+use crate::cpu::r5000::MemoryAccess;
 
 /// MACE base address (IRIX `mace.h`).
 pub const MACE_BASE: u32 = 0x1f00_0000;
