@@ -1284,13 +1284,8 @@ impl R5000 {
                 self.fpu_l(instr, ft, fs, fd, funct);
             }
             0x18 => {
-                // PS - Paired Single (MIPS IV extension, not fully implemented)
-                // For now, treat as reserved instruction
-                log::warn_msg(&format!(
-                    "Paired Single FPU fmt not implemented at PC 0x{:08x}",
-                    self.state.pc
-                ));
-                self.exception(ExceptionCode::ReservedInstr);
+                // PS - Paired Single (MIPS IV extension)
+                self.fpu_ps(instr, ft, fs, fd, funct);
             }
             _ => {
                 log::warn_msg(&format!(
@@ -1481,6 +1476,11 @@ impl R5000 {
                 let d_val = f64::from_bits(self.state.fpr[fs] as u64);
                 d_val as i32 as u32 as u64
             }
+            0x24 => {
+                // CVT.W.L - convert long to word
+                let l_val = self.state.fpr[fs] as i64;
+                l_val as i32 as u32 as u64
+            }
             _ => {
                 log::warn_msg(&format!(
                     "Unimplemented FPU W funct 0x{funct:02x} at PC 0x{:08x}",
@@ -1509,6 +1509,11 @@ impl R5000 {
                 let d_val = f64::from_bits(self.state.fpr[fs] as u64);
                 d_val as i64 as u64
             }
+            0x24 => {
+                // CVT.L.W - convert word to long
+                let w_val = self.state.fpr[fs] as i32;
+                w_val as i64 as u64
+            }
             _ => {
                 log::warn_msg(&format!(
                     "Unimplemented FPU L funct 0x{funct:02x} at PC 0x{:08x}",
@@ -1520,6 +1525,110 @@ impl R5000 {
         };
 
         self.state.fpr[fd] = result;
+    }
+
+    /// Paired Single FPU operations (MIPS IV extension)
+    /// PS format packs two single-precision floats into a 64-bit register:
+    /// bits 31:0 = lower half, bits 63:32 = upper half
+    fn fpu_ps(&mut self, _instr: u32, ft: usize, fs: usize, fd: usize, funct: u32) {
+        // Extract paired single values (two f32 packed in u64)
+        let fs_bits = self.state.fpr[fs];
+        let ft_bits = self.state.fpr[ft];
+        let fd_bits = self.state.fpr[fd];
+
+        let fs_lo = f32::from_bits(fs_bits as u32);
+        let fs_hi = f32::from_bits((fs_bits >> 32) as u32);
+        let ft_lo = f32::from_bits(ft_bits as u32);
+        let ft_hi = f32::from_bits((ft_bits >> 32) as u32);
+        let fd_lo = f32::from_bits(fd_bits as u32);
+        let fd_hi = f32::from_bits((fd_bits >> 32) as u32);
+
+        let (result_lo, result_hi) = match funct {
+            0x00 => (fd_lo + fs_lo, fd_hi + fs_hi),      // ADD.PS
+            0x01 => (fd_lo - fs_lo, fd_hi - fs_hi),      // SUB.PS
+            0x02 => (fd_lo * fs_lo, fd_hi * fs_hi),      // MUL.PS
+            0x03 => (fd_lo / fs_lo, fd_hi / fs_hi),      // DIV.PS
+            0x04 => (fd_lo.sqrt(), fd_hi.sqrt()),        // SQRT.PS
+            0x05 => (fd_lo.abs(), fd_hi.abs()),          // ABS.PS
+            0x06 => (fd_lo, fd_hi),                      // MOV.PS
+            0x07 => (-fd_lo, -fd_hi),                    // NEG.PS
+            0x10 => (1.0 / fd_lo, 1.0 / fd_hi),          // RECIP.PS
+            0x11 => (1.0 / fd_lo.sqrt(), 1.0 / fd_hi.sqrt()), // RSQRT.PS
+            0x20 => {
+                // CVT.PS.S - convert single to paired single (replicate)
+                let s_val = f32::from_bits(self.state.fpr[fs] as u32);
+                (s_val, s_val)
+            }
+            0x21 => {
+                // CVT.S.PS - convert paired single to single (extract lower)
+                // This writes to a single-precision register, not PS
+                // For now, just extract lower half
+                let s_val = fd_lo;
+                self.state.fpr[fd] = s_val.to_bits() as u64;
+                return;
+            }
+            0x30..=0x3f => {
+                // Comparison operations - set condition bit in FCR31
+                let cond = funct & 0x0f;
+                let cmp_lo = match cond {
+                    0x00 => fd_lo < fs_lo,      // C.F.PS
+                    0x01 => fd_lo == fs_lo,     // C.UN.PS
+                    0x02 => fd_lo <= fs_lo,     // C.EQ.PS
+                    0x03 => fd_lo < fs_lo,      // C.UEQ.PS
+                    0x04 => fd_lo <= fs_lo,     // C.OLT.PS
+                    0x05 => fd_lo < fs_lo,      // C.ULT.PS
+                    0x06 => fd_lo <= fs_lo,     // C.OLE.PS
+                    0x07 => fd_lo < fs_lo,      // C.ULE.PS
+                    0x08 => fd_lo > fs_lo,      // C.SF.PS
+                    0x09 => fd_lo != fs_lo,     // C.NGLE.PS
+                    0x0a => fd_lo >= fs_lo,     // C.SEQ.PS
+                    0x0b => fd_lo > fs_lo,      // C.NGL.PS
+                    0x0c => fd_lo >= fs_lo,     // C.LT.PS
+                    0x0d => fd_lo > fs_lo,      // C.NGE.PS
+                    0x0e => fd_lo >= fs_lo,     // C.LE.PS
+                    0x0f => fd_lo > fs_lo,      // C.NGT.PS
+                    _ => false,
+                };
+                let cmp_hi = match cond {
+                    0x00 => fd_hi < fs_hi,
+                    0x01 => fd_hi == fs_hi,
+                    0x02 => fd_hi <= fs_hi,
+                    0x03 => fd_hi < fs_hi,
+                    0x04 => fd_hi <= fs_hi,
+                    0x05 => fd_hi < fs_hi,
+                    0x06 => fd_hi <= fs_hi,
+                    0x07 => fd_hi < fs_hi,
+                    0x08 => fd_hi > fs_hi,
+                    0x09 => fd_hi != fs_hi,
+                    0x0a => fd_hi >= fs_hi,
+                    0x0b => fd_hi > fs_hi,
+                    0x0c => fd_hi >= fs_hi,
+                    0x0d => fd_hi > fs_hi,
+                    0x0e => fd_hi >= fs_hi,
+                    0x0f => fd_hi > fs_hi,
+                    _ => false,
+                };
+                // For PS comparisons, both halves must match for true
+                let cmp_result = cmp_lo && cmp_hi;
+                if cmp_result {
+                    self.state.fcr31 |= 1 << 23;
+                } else {
+                    self.state.fcr31 &= !(1 << 23);
+                }
+                return; // Comparisons don't write to fd
+            }
+            _ => {
+                log::warn_msg(&format!(
+                    "Unimplemented FPU PS funct 0x{funct:02x} at PC 0x{:08x}",
+                    self.state.pc
+                ));
+                self.exception(ExceptionCode::ReservedInstr);
+                return;
+            }
+        };
+
+        // Pack result back into 64-bit register
+        self.state.fpr[fd] = (result_hi.to_bits() as u64) << 32 | (result_lo.to_bits() as u64);
     }
 
     // === Exceptions ===
