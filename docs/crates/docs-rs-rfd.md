@@ -1,0 +1,109 @@
+Rusty File Dialogs is a cross platform library for using native file open/save dialogs. It provides both asynchronous and synchronous APIs. Supported platforms:
+
+    Windows
+    macOS
+    Linux & BSDs (GTK3 or XDG Desktop Portal)
+    WASM32 (async only)
+
+Examples
+Synchronous
+
+use rfd::FileDialog;
+
+let files = FileDialog::new()
+    .add_filter("text", &["txt", "rs"])
+    .add_filter("rust", &["rs", "toml"])
+    .set_directory("/")
+    .pick_file();
+
+Asynchronous
+
+use rfd::AsyncFileDialog;
+
+let future = async {
+    let file = AsyncFileDialog::new()
+        .add_filter("text", &["txt", "rs"])
+        .add_filter("rust", &["rs", "toml"])
+        .set_directory("/")
+        .pick_file()
+        .await;
+
+    let data = file.unwrap().read().await;
+};
+
+Linux & BSD backends
+
+On Linux & BSDs, two backends are available, one using the GTK3 Rust bindings and the other using the XDG Desktop Portal D-Bus API through libdbus or zenity.
+GTK backend
+
+The GTK backend is used when the xdg-portal feature is disabled with the default-features = false, and gtk3 is enabled instead. The GTK3 backend requires the C library and development headers to be installed to build RFD. The package names on various distributions are:
+Distribution	Installation Command
+Fedora	dnf install gtk3-devel
+Arch	pacman -S gtk3
+Debian & Ubuntu	apt install libgtk-3-dev
+XDG Desktop Portal backend
+
+The XDG Desktop Portal backend is used with the xdg-portal Cargo feature which is enabled by default. This backend will use either the GTK or KDE file dialog depending on the desktop environment in use at runtime.
+
+It requires the user to have libdbus system liblary (should be available on any systemd distro), if the liblary is not found zenity will be used instead.
+
+It requires the user to also have either the GTK, GNOME, or KDE XDG Desktop Portal backend installed at runtime. These are typically installed by the distribution together with the desktop environment.
+
+The wlroots portal backend does not implement the D-Bus API that RFD requires (it does not interfere with the other portal implementations; they can all be installed simultaneously).
+
+Zenity is also required to display message dialogs, and is used for file dialogs if xdg portal fails.
+
+If you are packaging an application that uses RFD, ensure that both a supported portal backend and Zenity are installed with the package.
+macOS non-windowed applications, async, and threading
+
+macOS async dialogs require an NSApplication instance, so the dialog is only truly async when opened in windowed environment like winit or SDL2. Otherwise, it will fallback to sync dialog. It is also recommended to spawn dialogs on your main thread. RFD can run dialogs from any thread but it is only possible in a windowed app and it adds a little bit of overhead. So it is recommended to spawn on main and await in other thread. Non-windowed apps will never be able to spawn async dialogs or from threads other than the main thread.
+Customize button texts of message dialog in Windows
+
+TaskDialogIndirect API is used for showing message dialog which can have customized button texts. It is only provided by ComCtl32.dll v6 but Windows use v5 by default. If you want to customize button texts or just need a modern dialog style (aka visual styles), you will need to:
+
+    Enable cargo feature common-controls-v6.
+    Add an application manifest to use ComCtl32.dll v5. See Windows Controls / Enabling Visual Styles
+
+Here is an example using embed-resource.
+Cargo features
+
+    gtk3: Uses GTK for dialogs on Linux & BSDs; has no effect on Windows and macOS
+    xdg-portal: Uses XDG Desktop Portal instead of GTK on Linux & BSDs
+    common-controls-v6: Use TaskDialogIndirect API from ComCtl32.dll v6 for showing message dialog. This is necessary if you need to customize dialog button texts.
+
+State
+API Stability
+🚧
+Feature	Linux	Windows	MacOS	Wasm32
+SingleFile	✔	✔	✔	✔
+MultipleFile	✔	✔	✔	✔
+PickFolder	✔	✔	✔	✖
+SaveFile	✔	✔	✔	✖
+Filters	✔	✔	✔	✔
+StartingPath	✔	✔	✔	✖
+Async	✔	✔	✔	✔
+rfd-extras
+
+AKA features that are not file related
+Feature	Linux	Windows	MacOS	Wasm32
+MessageDialog	✔	✔	✔	✔
+PromptDialog				
+ColorPicker				
+Structs
+
+AsyncFileDialog
+    Asynchronous File Dialog. Supported platforms:
+AsyncMessageDialog
+    Asynchronous Message Dialog. Supported platforms:
+FileDialog
+    Synchronous File Dialog. Supported platforms:
+FileHandle
+    FileHandle is a way of abstracting over a file returned by a dialog
+MessageDialog
+    Synchronous Message Dialog. Supported platforms:
+
+Enums
+
+MessageButtons
+MessageDialogResult
+MessageLevel
