@@ -1142,65 +1142,65 @@ impl AddressSpace for GbeDisplayEngine {
 
     fn read32(&mut self, addr: u32) -> u32 {
         match addr {
-            gbe::CTRLSTAT => self.ctrlstat,
-            gbe::DOTCLOCK => self.dotclock,
-            gbe::I2C => self.i2c,
-            gbe::SYSCLK => self.sysclk,
-            gbe::I2CFP => self.i2cfp,
-            gbe::ID => self.id,
-            gbe::VT_XY => self.vt_xy,
-            gbe::VT_XYMAX => self.vt_xymax,
-            gbe::VT_VSYNC => self.vt_vsync,
-            gbe::VT_HSYNC => self.vt_hsync,
-            gbe::VT_VBLANK => self.vt_vblank,
-            gbe::VT_HBLANK => self.vt_hblank,
-            gbe::VT_FLAGS => self.vt_flags,
-            gbe::VT_F2RF_LOCK => self.vt_f2rf_lock,
-            gbe::VT_INTR01 => self.vt_intr01,
-            gbe::VT_INTR23 => self.vt_intr23,
-            gbe::FP_HDRV => self.fp_hdrv,
-            gbe::FP_VDRV => self.fp_vdrv,
-            gbe::FP_DE => self.fp_de,
-            gbe::VT_HPIXEN => self.vt_hpixen,
-            gbe::VT_VPIXEN => self.vt_vpixen,
-            gbe::VT_HCMAP => self.vt_hcmap,
-            gbe::VT_VCMAP => self.vt_vcmap,
-            gbe::DID_START_XY => self.did_start_xy,
-            gbe::CRS_START_XY => self.crs_start_xy,
-            gbe::VC_START_XY => self.vc_start_xy,
-            gbe::OVR_WIDTH_TILE => self.ovr_width_tile,
-            gbe::OVR_CONTROL => self.ovr_control,
-            gbe::FRM_SIZE_TILE => self.frm_size_tile,
-            gbe::FRM_SIZE_PIXEL => self.frm_size_pixel,
-            gbe::FRM_CONTROL => self.frm_control,
-            gbe::DID_CONTROL => self.did_control,
-            gbe::WID_MODE..=gbe::WID_MODE + 124 => {
-                let idx = ((addr - gbe::WID_MODE) / 4) as usize;
+            a if a == gbe::CTRLSTAT => self.ctrlstat,
+            a if a == gbe::DOTCLOCK => self.dotclock,
+            a if a == gbe::I2C => self.i2c,
+            a if a == gbe::SYSCLK => self.sysclk,
+            a if a == gbe::I2CFP => self.i2cfp,
+            a if a == gbe::ID => self.id,
+            a if a == gbe::VT_XY => self.vt_xy,
+            a if a == gbe::VT_XYMAX => self.vt_xymax,
+            a if a == gbe::VT_VSYNC => self.vt_vsync,
+            a if a == gbe::VT_HSYNC => self.vt_hsync,
+            a if a == gbe::VT_VBLANK => self.vt_vblank,
+            a if a == gbe::VT_HBLANK => self.vt_hblank,
+            a if a == gbe::VT_FLAGS => self.vt_flags,
+            a if a == gbe::VT_F2RF_LOCK => self.vt_f2rf_lock,
+            a if a == gbe::VT_INTR01 => self.vt_intr01,
+            a if a == gbe::VT_INTR23 => self.vt_intr23,
+            a if a == gbe::FP_HDRV => self.fp_hdrv,
+            a if a == gbe::FP_VDRV => self.fp_vdrv,
+            a if a == gbe::FP_DE => self.fp_de,
+            a if a == gbe::VT_HPIXEN => self.vt_hpixen,
+            a if a == gbe::VT_VPIXEN => self.vt_vpixen,
+            a if a == gbe::VT_HCMAP => self.vt_hcmap,
+            a if a == gbe::VT_VCMAP => self.vt_vcmap,
+            a if a == gbe::DID_START_XY => self.did_start_xy,
+            a if a == gbe::CRS_START_XY => self.crs_start_xy,
+            a if a == gbe::VC_START_XY => self.vc_start_xy,
+            a if a == gbe::OVR_WIDTH_TILE => self.ovr_width_tile,
+            a if a == gbe::OVR_CONTROL => self.ovr_control,
+            a if a == gbe::FRM_SIZE_TILE => self.frm_size_tile,
+            a if a == gbe::FRM_SIZE_PIXEL => self.frm_size_pixel,
+            a if a == gbe::FRM_CONTROL => self.frm_control,
+            a if a == gbe::DID_CONTROL => self.did_control,
+            a if (gbe::WID_MODE..=gbe::WID_MODE + 124).contains(&a) => {
+                let idx = ((a - gbe::WID_MODE) / 4) as usize;
                 if idx < 32 { self.wid_mode[idx] } else { 0 }
             }
-            gbe::CMAP..=gbe::CMAP + 18428 => {
-                let idx = ((addr - gbe::CMAP) / 4) as usize;
+            a if (gbe::CMAP..=gbe::CMAP + 18428).contains(&a) => {
+                let idx = ((a - gbe::CMAP) / 4) as usize;
                 if idx < 4608 { self.cmap[idx] } else { 0 }
             }
-            gbe::CM_FIFO => self.cm_fifo,
-            gbe::GMAP..=gbe::GMAP + 1020 => {
-                let idx = ((addr - gbe::GMAP) / 4) as usize;
+            a if a == gbe::CM_FIFO => self.cm_fifo,
+            a if (gbe::GMAP..=gbe::GMAP + 1020).contains(&a) => {
+                let idx = ((a - gbe::GMAP) / 4) as usize;
                 if idx < 256 { self.gmap[idx] } else { 0 }
             }
-            gbe::CRS_POS => self.crs_pos,
-            gbe::CRS_CTL => self.crs_ctl,
-            gbe::CRS_CMAP..=gbe::CRS_CMAP + 8 => {
-                let idx = ((addr - gbe::CRS_CMAP) / 4) as usize;
+            a if a == gbe::CRS_POS => self.crs_pos,
+            a if a == gbe::CRS_CTL => self.crs_ctl,
+            a if (gbe::CRS_CMAP..=gbe::CRS_CMAP + 8).contains(&a) => {
+                let idx = ((a - gbe::CRS_CMAP) / 4) as usize;
                 if idx < 3 { self.crs_cmap[idx] } else { 0 }
             }
-            gbe::CRS_GLYPH..=gbe::CRS_GLYPH + 252 => {
-                let idx = ((addr - gbe::CRS_GLYPH) / 4) as usize;
+            a if (gbe::CRS_GLYPH..=gbe::CRS_GLYPH + 252).contains(&a) => {
+                let idx = ((a - gbe::CRS_GLYPH) / 4) as usize;
                 if idx < 64 { self.crs_glyph[idx] } else { 0 }
             }
-            gbe::VC_LR => self.vc_lr,
-            gbe::VC_TB => self.vc_tb,
-            gbe::VC_FILTERS => self.vc_filters,
-            gbe::VC_CONTROL => self.vc_control,
+            a if a == gbe::VC_LR => self.vc_lr,
+            a if a == gbe::VC_TB => self.vc_tb,
+            a if a == gbe::VC_FILTERS => self.vc_filters,
+            a if a == gbe::VC_CONTROL => self.vc_control,
             _ => 0,
         }
     }
@@ -1215,64 +1215,64 @@ impl AddressSpace for GbeDisplayEngine {
 
     fn write32(&mut self, addr: u32, value: u32) {
         match addr {
-            gbe::CTRLSTAT => self.ctrlstat = value,
-            gbe::DOTCLOCK => self.dotclock = value,
-            gbe::I2C => self.i2c = value,
-            gbe::SYSCLK => self.sysclk = value,
-            gbe::I2CFP => self.i2cfp = value,
-            gbe::VT_XY => self.vt_xy = value,
-            gbe::VT_XYMAX => self.vt_xymax = value,
-            gbe::VT_VSYNC => self.vt_vsync = value,
-            gbe::VT_HSYNC => self.vt_hsync = value,
-            gbe::VT_VBLANK => self.vt_vblank = value,
-            gbe::VT_HBLANK => self.vt_hblank = value,
-            gbe::VT_FLAGS => self.vt_flags = value,
-            gbe::VT_F2RF_LOCK => self.vt_f2rf_lock = value,
-            gbe::VT_INTR01 => self.vt_intr01 = value,
-            gbe::VT_INTR23 => self.vt_intr23 = value,
-            gbe::FP_HDRV => self.fp_hdrv = value,
-            gbe::FP_VDRV => self.fp_vdrv = value,
-            gbe::FP_DE => self.fp_de = value,
-            gbe::VT_HPIXEN => self.vt_hpixen = value,
-            gbe::VT_VPIXEN => self.vt_vpixen = value,
-            gbe::VT_HCMAP => self.vt_hcmap = value,
-            gbe::VT_VCMAP => self.vt_vcmap = value,
-            gbe::DID_START_XY => self.did_start_xy = value,
-            gbe::CRS_START_XY => self.crs_start_xy = value,
-            gbe::VC_START_XY => self.vc_start_xy = value,
-            gbe::OVR_WIDTH_TILE => self.ovr_width_tile = value,
-            gbe::OVR_CONTROL => self.ovr_control = value,
-            gbe::FRM_SIZE_TILE => self.frm_size_tile = value,
-            gbe::FRM_SIZE_PIXEL => self.frm_size_pixel = value,
-            gbe::FRM_CONTROL => self.frm_control = value,
-            gbe::DID_CONTROL => self.did_control = value,
-            gbe::WID_MODE..=gbe::WID_MODE + 124 => {
-                let idx = ((addr - gbe::WID_MODE) / 4) as usize;
+            a if a == gbe::CTRLSTAT => self.ctrlstat = value,
+            a if a == gbe::DOTCLOCK => self.dotclock = value,
+            a if a == gbe::I2C => self.i2c = value,
+            a if a == gbe::SYSCLK => self.sysclk = value,
+            a if a == gbe::I2CFP => self.i2cfp = value,
+            a if a == gbe::VT_XY => self.vt_xy = value,
+            a if a == gbe::VT_XYMAX => self.vt_xymax = value,
+            a if a == gbe::VT_VSYNC => self.vt_vsync = value,
+            a if a == gbe::VT_HSYNC => self.vt_hsync = value,
+            a if a == gbe::VT_VBLANK => self.vt_vblank = value,
+            a if a == gbe::VT_HBLANK => self.vt_hblank = value,
+            a if a == gbe::VT_FLAGS => self.vt_flags = value,
+            a if a == gbe::VT_F2RF_LOCK => self.vt_f2rf_lock = value,
+            a if a == gbe::VT_INTR01 => self.vt_intr01 = value,
+            a if a == gbe::VT_INTR23 => self.vt_intr23 = value,
+            a if a == gbe::FP_HDRV => self.fp_hdrv = value,
+            a if a == gbe::FP_VDRV => self.fp_vdrv = value,
+            a if a == gbe::FP_DE => self.fp_de = value,
+            a if a == gbe::VT_HPIXEN => self.vt_hpixen = value,
+            a if a == gbe::VT_VPIXEN => self.vt_vpixen = value,
+            a if a == gbe::VT_HCMAP => self.vt_hcmap = value,
+            a if a == gbe::VT_VCMAP => self.vt_vcmap = value,
+            a if a == gbe::DID_START_XY => self.did_start_xy = value,
+            a if a == gbe::CRS_START_XY => self.crs_start_xy = value,
+            a if a == gbe::VC_START_XY => self.vc_start_xy = value,
+            a if a == gbe::OVR_WIDTH_TILE => self.ovr_width_tile = value,
+            a if a == gbe::OVR_CONTROL => self.ovr_control = value,
+            a if a == gbe::FRM_SIZE_TILE => self.frm_size_tile = value,
+            a if a == gbe::FRM_SIZE_PIXEL => self.frm_size_pixel = value,
+            a if a == gbe::FRM_CONTROL => self.frm_control = value,
+            a if a == gbe::DID_CONTROL => self.did_control = value,
+            a if (gbe::WID_MODE..=gbe::WID_MODE + 124).contains(&a) => {
+                let idx = ((a - gbe::WID_MODE) / 4) as usize;
                 if idx < 32 { self.wid_mode[idx] = value; }
             }
-            gbe::CMAP..=gbe::CMAP + 18428 => {
-                let idx = ((addr - gbe::CMAP) / 4) as usize;
+            a if (gbe::CMAP..=gbe::CMAP + 18428).contains(&a) => {
+                let idx = ((a - gbe::CMAP) / 4) as usize;
                 if idx < 4608 { self.cmap[idx] = value; }
             }
-            gbe::CM_FIFO => self.cm_fifo = value,
-            gbe::GMAP..=gbe::GMAP + 1020 => {
-                let idx = ((addr - gbe::GMAP) / 4) as usize;
+            a if a == gbe::CM_FIFO => self.cm_fifo = value,
+            a if (gbe::GMAP..=gbe::GMAP + 1020).contains(&a) => {
+                let idx = ((a - gbe::GMAP) / 4) as usize;
                 if idx < 256 { self.gmap[idx] = value; }
             }
-            gbe::CRS_POS => self.crs_pos = value,
-            gbe::CRS_CTL => self.crs_ctl = value,
-            gbe::CRS_CMAP..=gbe::CRS_CMAP + 8 => {
-                let idx = ((addr - gbe::CRS_CMAP) / 4) as usize;
+            a if a == gbe::CRS_POS => self.crs_pos = value,
+            a if a == gbe::CRS_CTL => self.crs_ctl = value,
+            a if (gbe::CRS_CMAP..=gbe::CRS_CMAP + 8).contains(&a) => {
+                let idx = ((a - gbe::CRS_CMAP) / 4) as usize;
                 if idx < 3 { self.crs_cmap[idx] = value; }
             }
-            gbe::CRS_GLYPH..=gbe::CRS_GLYPH + 252 => {
-                let idx = ((addr - gbe::CRS_GLYPH) / 4) as usize;
+            a if (gbe::CRS_GLYPH..=gbe::CRS_GLYPH + 252).contains(&a) => {
+                let idx = ((a - gbe::CRS_GLYPH) / 4) as usize;
                 if idx < 64 { self.crs_glyph[idx] = value; }
             }
-            gbe::VC_LR => self.vc_lr = value,
-            gbe::VC_TB => self.vc_tb = value,
-            gbe::VC_FILTERS => self.vc_filters = value,
-            gbe::VC_CONTROL => self.vc_control = value,
+            a if a == gbe::VC_LR => self.vc_lr = value,
+            a if a == gbe::VC_TB => self.vc_tb = value,
+            a if a == gbe::VC_FILTERS => self.vc_filters = value,
+            a if a == gbe::VC_CONTROL => self.vc_control = value,
             _ => {}
         }
     }
