@@ -320,7 +320,7 @@ mod ice {
 }
 
 /// ICE state.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Ice {
     id: u32,
     control: u32,
@@ -333,6 +333,24 @@ pub struct Ice {
     data_fifo: [u32; 64],
     data_fifo_head: usize,
     data_fifo_tail: usize,
+}
+
+impl Default for Ice {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            control: 0,
+            status: 0,
+            intstat: 0,
+            intmask: 0,
+            cmd_fifo: [0; 64],
+            cmd_fifo_head: 0,
+            cmd_fifo_tail: 0,
+            data_fifo: [0; 64],
+            data_fifo_head: 0,
+            data_fifo_tail: 0,
+        }
+    }
 }
 
 impl Ice {
@@ -553,7 +571,7 @@ mod draw_mode {
 }
 
 /// CRIME Render Engine (MRE) state.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct RenderEngine {
     // Interface Buffer (page 0)
     intfbuf_data: [u32; 64],
@@ -1086,7 +1104,7 @@ mod gbe_mode {
 }
 
 /// GBE Display Engine state.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct GbeDisplayEngine {
     // Control / clock / ID
     ctrlstat: u32,
@@ -1152,6 +1170,58 @@ pub struct GbeDisplayEngine {
 
     // Framebuffer tile list (simplified - points to main memory)
     tile_list_ptr: u32,
+}
+
+impl Default for GbeDisplayEngine {
+    fn default() -> Self {
+        Self {
+            ctrlstat: 0,
+            dotclock: 0,
+            i2c: 0,
+            sysclk: 0,
+            i2cfp: 0,
+            id: 0,
+            vt_xy: 0,
+            vt_xymax: 0,
+            vt_vsync: 0,
+            vt_hsync: 0,
+            vt_vblank: 0,
+            vt_hblank: 0,
+            vt_flags: 0,
+            vt_f2rf_lock: 0,
+            vt_intr01: 0,
+            vt_intr23: 0,
+            fp_hdrv: 0,
+            fp_vdrv: 0,
+            fp_de: 0,
+            vt_hpixen: 0,
+            vt_vpixen: 0,
+            vt_hcmap: 0,
+            vt_vcmap: 0,
+            did_start_xy: 0,
+            crs_start_xy: 0,
+            vc_start_xy: 0,
+            ovr_width_tile: 0,
+            ovr_control: 0,
+            frm_size_tile: 0,
+            frm_size_pixel: 0,
+            frm_control: 0,
+            did_control: 0,
+            wid_mode: [0; 32],
+            cmap: [0; 4608],
+            cm_fifo: 0,
+            gmap: [0; 256],
+            crs_pos: 0,
+            crs_ctl: 0,
+            crs_cmap: [0; 3],
+            crs_glyph: [0; 64],
+            vc_lr: 0,
+            vc_tb: 0,
+            vc_filters: 0,
+            vc_control: 0,
+            tile_list_ptr: 0,
+        }
+    }
 }
 
 impl GbeDisplayEngine {

@@ -72,3 +72,6 @@ byteorder.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
+cranelift = "0.135.1"
+cranelift-module   = "0.135.1"
+cranelift-jit  = "0.135.1"
