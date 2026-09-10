@@ -10,6 +10,7 @@
 
 pub mod physical;
 
+use crate::graphics::{CrimeCpuInterface, GbeDisplayEngine, Ice, RenderEngine};
 use crate::io::Mace;
 use crate::ip32;
 
@@ -52,12 +53,16 @@ pub struct MemoryMap {
     pub ram: physical::PhysicalMemory,
     /// PROM / system ROM.
     pub rom: physical::PhysicalMemory,
-    /// CRIME CPU interface (MMIO).
-    pub crime: physical::PhysicalMemory,
+    /// CRIME CPU interface (Microprocessor) at 0x1400_0000.
+    pub crime_cpu: CrimeCpuInterface,
+    /// ICE (Imaging & Compression Engine / VICE) at 0x1700_0000.
+    pub ice: Ice,
+    /// Render Engine (MRE) at 0x1500_0000.
+    pub render_engine: RenderEngine,
+    /// GBE display engine at 0x1600_0000.
+    pub gbe: GbeDisplayEngine,
     /// MACE I/O engine (MMIO).
     pub mace: Mace,
-    /// GBE display engine (MMIO).
-    pub gbe: physical::PhysicalMemory,
 }
 
 impl MemoryMap {
@@ -67,9 +72,11 @@ impl MemoryMap {
         Self {
             ram: physical::PhysicalMemory::new(ram_size as usize),
             rom: physical::PhysicalMemory::new(ip32::SYSTEM_ROM_WINDOW_SIZE as usize),
-            crime: physical::PhysicalMemory::new(0x1000),
+            crime_cpu: CrimeCpuInterface::new(),
+            ice: Ice::new(),
+            render_engine: RenderEngine::new(),
+            gbe: GbeDisplayEngine::new(),
             mace: Mace::new(),
-            gbe: physical::PhysicalMemory::new(0x1000),
         }
     }
 
@@ -77,9 +84,10 @@ impl MemoryMap {
     pub fn read32(&mut self, addr: u32) -> u32 {
         match addr {
             a if a < ip32::PHYS_BASE_CRIME => self.ram.read32(a),
-            a if a < ip32::PHYS_BASE_RENDER => self.crime.read32(a - ip32::PHYS_BASE_CRIME),
-            a if a < ip32::PHYS_BASE_GBE => 0, // Render engine (unimplemented)
-            a if a < ip32::PHYS_BASE_MACE => self.gbe.read32(a - ip32::PHYS_BASE_GBE),
+            a if a < ip32::PHYS_BASE_RENDER => self.crime_cpu.read32(a - ip32::PHYS_BASE_CRIME),
+            a if a < ip32::PHYS_BASE_GBE => self.render_engine.read32(a - ip32::PHYS_BASE_RENDER),
+            a if a < ip32::PHYS_BASE_ICE => self.gbe.read32(a - ip32::PHYS_BASE_GBE),
+            a if a < ip32::PHYS_BASE_MACE => self.ice.read32(a - ip32::PHYS_BASE_ICE),
             a if a < ip32::PHYS_SYSTEM_ROM => self.mace.read32(a - ip32::PHYS_BASE_MACE),
             a => self.rom.read32(a - ip32::PHYS_SYSTEM_ROM),
         }
@@ -90,11 +98,20 @@ impl MemoryMap {
         match addr {
             a if a < ip32::PHYS_BASE_CRIME => self.ram.write32(a, value),
             a if a < ip32::PHYS_BASE_RENDER => {
-                self.crime.write32(a - ip32::PHYS_BASE_CRIME, value)
+                self.crime_cpu.write32(a - ip32::PHYS_BASE_CRIME, value)
             }
-            a if a < ip32::PHYS_BASE_GBE => {} // Render engine (unimplemented)
-            a if a < ip32::PHYS_BASE_MACE => self.gbe.write32(a - ip32::PHYS_BASE_GBE, value),
-            a if a < ip32::PHYS_SYSTEM_ROM => self.mace.write32(a - ip32::PHYS_BASE_MACE, value),
+            a if a < ip32::PHYS_BASE_GBE => {
+                self.render_engine.write32(a - ip32::PHYS_BASE_RENDER, value)
+            }
+            a if a < ip32::PHYS_BASE_ICE => {
+                self.gbe.write32(a - ip32::PHYS_BASE_GBE, value)
+            }
+            a if a < ip32::PHYS_BASE_MACE => {
+                self.ice.write32(a - ip32::PHYS_BASE_ICE, value)
+            }
+            a if a < ip32::PHYS_SYSTEM_ROM => {
+                self.mace.write32(a - ip32::PHYS_BASE_MACE, value)
+            }
             a => self.rom.write32(a - ip32::PHYS_SYSTEM_ROM, value),
         }
     }
@@ -103,9 +120,10 @@ impl MemoryMap {
     pub fn read16(&mut self, addr: u32) -> u16 {
         match addr {
             a if a < ip32::PHYS_BASE_CRIME => self.ram.read16(a),
-            a if a < ip32::PHYS_BASE_RENDER => self.crime.read16(a - ip32::PHYS_BASE_CRIME),
-            a if a < ip32::PHYS_BASE_GBE => 0,
-            a if a < ip32::PHYS_BASE_MACE => self.gbe.read16(a - ip32::PHYS_BASE_GBE),
+            a if a < ip32::PHYS_BASE_RENDER => self.crime_cpu.read16(a - ip32::PHYS_BASE_CRIME),
+            a if a < ip32::PHYS_BASE_GBE => self.render_engine.read16(a - ip32::PHYS_BASE_RENDER),
+            a if a < ip32::PHYS_BASE_ICE => self.gbe.read16(a - ip32::PHYS_BASE_GBE),
+            a if a < ip32::PHYS_BASE_MACE => self.ice.read16(a - ip32::PHYS_BASE_ICE),
             a if a < ip32::PHYS_SYSTEM_ROM => self.mace.read16(a - ip32::PHYS_BASE_MACE),
             a => self.rom.read16(a - ip32::PHYS_SYSTEM_ROM),
         }
@@ -116,11 +134,20 @@ impl MemoryMap {
         match addr {
             a if a < ip32::PHYS_BASE_CRIME => self.ram.write16(a, value),
             a if a < ip32::PHYS_BASE_RENDER => {
-                self.crime.write16(a - ip32::PHYS_BASE_CRIME, value)
+                self.crime_cpu.write16(a - ip32::PHYS_BASE_CRIME, value)
             }
-            a if a < ip32::PHYS_BASE_GBE => {}
-            a if a < ip32::PHYS_BASE_MACE => self.gbe.write16(a - ip32::PHYS_BASE_GBE, value),
-            a if a < ip32::PHYS_SYSTEM_ROM => self.mace.write16(a - ip32::PHYS_BASE_MACE, value),
+            a if a < ip32::PHYS_BASE_GBE => {
+                self.render_engine.write16(a - ip32::PHYS_BASE_RENDER, value)
+            }
+            a if a < ip32::PHYS_BASE_ICE => {
+                self.gbe.write16(a - ip32::PHYS_BASE_GBE, value)
+            }
+            a if a < ip32::PHYS_BASE_MACE => {
+                self.ice.write16(a - ip32::PHYS_BASE_ICE, value)
+            }
+            a if a < ip32::PHYS_SYSTEM_ROM => {
+                self.mace.write16(a - ip32::PHYS_BASE_MACE, value)
+            }
             a => self.rom.write16(a - ip32::PHYS_SYSTEM_ROM, value),
         }
     }
@@ -129,9 +156,10 @@ impl MemoryMap {
     pub fn read8(&mut self, addr: u32) -> u8 {
         match addr {
             a if a < ip32::PHYS_BASE_CRIME => self.ram.read8(a),
-            a if a < ip32::PHYS_BASE_RENDER => self.crime.read8(a - ip32::PHYS_BASE_CRIME),
-            a if a < ip32::PHYS_BASE_GBE => 0,
-            a if a < ip32::PHYS_BASE_MACE => self.gbe.read8(a - ip32::PHYS_BASE_GBE),
+            a if a < ip32::PHYS_BASE_RENDER => self.crime_cpu.read8(a - ip32::PHYS_BASE_CRIME),
+            a if a < ip32::PHYS_BASE_GBE => self.render_engine.read8(a - ip32::PHYS_BASE_RENDER),
+            a if a < ip32::PHYS_BASE_ICE => self.gbe.read8(a - ip32::PHYS_BASE_GBE),
+            a if a < ip32::PHYS_BASE_MACE => self.ice.read8(a - ip32::PHYS_BASE_ICE),
             a if a < ip32::PHYS_SYSTEM_ROM => self.mace.read8(a - ip32::PHYS_BASE_MACE),
             a => self.rom.read8(a - ip32::PHYS_SYSTEM_ROM),
         }
@@ -142,11 +170,20 @@ impl MemoryMap {
         match addr {
             a if a < ip32::PHYS_BASE_CRIME => self.ram.write8(a, value),
             a if a < ip32::PHYS_BASE_RENDER => {
-                self.crime.write8(a - ip32::PHYS_BASE_CRIME, value)
+                self.crime_cpu.write8(a - ip32::PHYS_BASE_CRIME, value)
             }
-            a if a < ip32::PHYS_BASE_GBE => {}
-            a if a < ip32::PHYS_BASE_MACE => self.gbe.write8(a - ip32::PHYS_BASE_GBE, value),
-            a if a < ip32::PHYS_SYSTEM_ROM => self.mace.write8(a - ip32::PHYS_BASE_MACE, value),
+            a if a < ip32::PHYS_BASE_GBE => {
+                self.render_engine.write8(a - ip32::PHYS_BASE_RENDER, value)
+            }
+            a if a < ip32::PHYS_BASE_ICE => {
+                self.gbe.write8(a - ip32::PHYS_BASE_GBE, value)
+            }
+            a if a < ip32::PHYS_BASE_MACE => {
+                self.ice.write8(a - ip32::PHYS_BASE_ICE, value)
+            }
+            a if a < ip32::PHYS_SYSTEM_ROM => {
+                self.mace.write8(a - ip32::PHYS_BASE_MACE, value)
+            }
             a => self.rom.write8(a - ip32::PHYS_SYSTEM_ROM, value),
         }
     }
@@ -155,9 +192,10 @@ impl MemoryMap {
     pub fn read64(&mut self, addr: u32) -> u64 {
         match addr {
             a if a < ip32::PHYS_BASE_CRIME => self.ram.read64(a),
-            a if a < ip32::PHYS_BASE_RENDER => self.crime.read64(a - ip32::PHYS_BASE_CRIME),
-            a if a < ip32::PHYS_BASE_GBE => 0,
-            a if a < ip32::PHYS_BASE_MACE => self.gbe.read64(a - ip32::PHYS_BASE_GBE),
+            a if a < ip32::PHYS_BASE_RENDER => self.crime_cpu.read64(a - ip32::PHYS_BASE_CRIME),
+            a if a < ip32::PHYS_BASE_GBE => self.render_engine.read64(a - ip32::PHYS_BASE_RENDER),
+            a if a < ip32::PHYS_BASE_ICE => self.gbe.read64(a - ip32::PHYS_BASE_GBE),
+            a if a < ip32::PHYS_BASE_MACE => self.ice.read64(a - ip32::PHYS_BASE_ICE),
             a if a < ip32::PHYS_SYSTEM_ROM => self.mace.read64(a - ip32::PHYS_BASE_MACE),
             a => self.rom.read64(a - ip32::PHYS_SYSTEM_ROM),
         }
@@ -168,11 +206,20 @@ impl MemoryMap {
         match addr {
             a if a < ip32::PHYS_BASE_CRIME => self.ram.write64(a, value),
             a if a < ip32::PHYS_BASE_RENDER => {
-                self.crime.write64(a - ip32::PHYS_BASE_CRIME, value)
+                self.crime_cpu.write64(a - ip32::PHYS_BASE_CRIME, value)
             }
-            a if a < ip32::PHYS_BASE_GBE => {}
-            a if a < ip32::PHYS_BASE_MACE => self.gbe.write64(a - ip32::PHYS_BASE_GBE, value),
-            a if a < ip32::PHYS_SYSTEM_ROM => self.mace.write64(a - ip32::PHYS_BASE_MACE, value),
+            a if a < ip32::PHYS_BASE_GBE => {
+                self.render_engine.write64(a - ip32::PHYS_BASE_RENDER, value)
+            }
+            a if a < ip32::PHYS_BASE_ICE => {
+                self.gbe.write64(a - ip32::PHYS_BASE_GBE, value)
+            }
+            a if a < ip32::PHYS_BASE_MACE => {
+                self.ice.write64(a - ip32::PHYS_BASE_ICE, value)
+            }
+            a if a < ip32::PHYS_SYSTEM_ROM => {
+                self.mace.write64(a - ip32::PHYS_BASE_MACE, value)
+            }
             a => self.rom.write64(a - ip32::PHYS_SYSTEM_ROM, value),
         }
     }

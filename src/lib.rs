@@ -58,6 +58,8 @@ pub mod ip32 {
     pub const PHYS_BASE_RENDER: u32 = 0x1500_0000;
     /// GBE display engine base.
     pub const PHYS_BASE_GBE: u32 = 0x1600_0000;
+    /// ICE (VICE) image compression engine base.
+    pub const PHYS_BASE_ICE: u32 = 0x1700_0000;
     /// MACE (I/O engine) base.
     pub const PHYS_BASE_MACE: u32 = 0x1f00_0000;
     /// System ROM / PROM base (KSEG1 view).
