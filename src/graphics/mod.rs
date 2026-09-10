@@ -201,13 +201,13 @@ impl AddressSpace for CrimeCpuInterface {
             crime_cpu::CRM_HARDINT => self.hardint,
             crime_cpu::CRM_DOG => self.dog,
             crime_cpu::CRM_TIME => self.time_lo,
-            crime_cpu::CRM_TIME + 4 => self.time_hi,
+            a if a == crime_cpu::CRM_TIME + 4 => self.time_hi,
             crime_cpu::CRM_CPU_ERROR_ADDR => self.cpu_error_addr,
             crime_cpu::CRM_CPU_ERROR_STAT => self.cpu_error_stat,
             crime_cpu::CRM_CPU_ERROR_ENA => self.cpu_error_ena,
             crime_cpu::CRM_VICE_ERROR_ADDR => self.vice_error_addr,
             crime_cpu::CRM_MEM_CONTROL => self.mem_control,
-            crime_cpu::CRM_MEM_BANK_CTRL..=crime_cpu::CRM_MEM_BANK_CTRL + 56 => {
+            a if (crime_cpu::CRM_MEM_BANK_CTRL..=crime_cpu::CRM_MEM_BANK_CTRL + 56).contains(&a) => {
                 let idx = ((addr - crime_cpu::CRM_MEM_BANK_CTRL) / 8) as usize;
                 if idx < 8 { self.mem_bank_ctrl[idx] } else { 0 }
             }
@@ -259,7 +259,7 @@ impl AddressSpace for CrimeCpuInterface {
             crime_cpu::CRM_TIME => {
                 self.time_lo = value;
             }
-            crime_cpu::CRM_TIME + 4 => {
+            a if a == crime_cpu::CRM_TIME + 4 => {
                 self.time_hi = value;
             }
             crime_cpu::CRM_CPU_ERROR_ENA => {
@@ -268,7 +268,7 @@ impl AddressSpace for CrimeCpuInterface {
             crime_cpu::CRM_MEM_CONTROL => {
                 self.mem_control = value & 0x3;
             }
-            crime_cpu::CRM_MEM_BANK_CTRL..=crime_cpu::CRM_MEM_BANK_CTRL + 56 => {
+            a if (crime_cpu::CRM_MEM_BANK_CTRL..=crime_cpu::CRM_MEM_BANK_CTRL + 56).contains(&a) => {
                 let idx = ((addr - crime_cpu::CRM_MEM_BANK_CTRL) / 8) as usize;
                 if idx < 8 {
                     self.mem_bank_ctrl[idx] = value & 0x11f;
@@ -364,7 +364,7 @@ impl AddressSpace for Ice {
             ice::VICE_STATUS => self.status,
             ice::VICE_INTSTAT => self.intstat,
             ice::VICE_INTMASK => self.intmask,
-            ice::VICE_CMD_FIFO..=ice::VICE_CMD_FIFO + 252 => {
+            a if (ice::VICE_CMD_FIFO..=ice::VICE_CMD_FIFO + 252).contains(&a) => {
                 if self.cmd_fifo_head != self.cmd_fifo_tail {
                     let val = self.cmd_fifo[self.cmd_fifo_tail];
                     self.cmd_fifo_tail = (self.cmd_fifo_tail + 1) % 64;
@@ -373,7 +373,7 @@ impl AddressSpace for Ice {
                     0
                 }
             }
-            ice::VICE_DATA_FIFO..=ice::VICE_DATA_FIFO + 252 => {
+            a if (ice::VICE_DATA_FIFO..=ice::VICE_DATA_FIFO + 252).contains(&a) => {
                 if self.data_fifo_head != self.data_fifo_tail {
                     let val = self.data_fifo[self.data_fifo_tail];
                     self.data_fifo_tail = (self.data_fifo_tail + 1) % 64;
