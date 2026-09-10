@@ -48,6 +48,10 @@ fn main() -> Result<()> {
     let (uart1_tx, uart1_rx) = mpsc::channel::<u8>();
     let (uart2_tx, uart2_rx) = mpsc::channel::<u8>();
 
+    // Clone senders for the threads
+    let uart1_tx_stdin = uart1_tx.clone();
+    let uart2_rx_stdout = uart2_rx.clone();
+
     // Spawn thread to read from stdin and send to UART1 (console input)
     thread::spawn(move || {
         let mut stdin = io::stdin();
@@ -55,7 +59,7 @@ fn main() -> Result<()> {
         loop {
             match stdin.read_exact(&mut buf) {
                 Ok(_) => {
-                    if uart1_tx.send(buf[0]).is_err() {
+                    if uart1_tx_stdin.send(buf[0]).is_err() {
                         break; // Channel closed, exit thread
                     }
                 }
@@ -68,7 +72,7 @@ fn main() -> Result<()> {
     thread::spawn(move || {
         let mut stdout = io::stdout();
         loop {
-            match uart2_rx.recv() {
+            match uart2_rx_stdout.recv() {
                 Ok(byte) => {
                     if stdout.write_all(&[byte]).is_err() {
                         break;
