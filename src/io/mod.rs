@@ -370,7 +370,7 @@ impl Mace {
             // Peripheral
             offset if offset >= perif::BASE && offset <= perif::BASE + 0x4FFFF => self.perif.read32(offset - perif::BASE),
             // ISA External
-            offset if offset >= isa_ext::BASE && offset <= isa_ext::BASE + 0x3FFFF => self.isa_ext.read32(offset - isa_ext::BASE),
+            offset if offset >= isa_ext::BASE && offset <= isa_ext::BASE + 0x3FFFF => self.isa_ext.read32_immutable(offset - isa_ext::BASE),
             // Video In 1
             offset if offset >= vin1::BASE && offset <= vin1::BASE + 0xFF => self.vin1.read32(offset - vin1::BASE),
             // Video In 2
@@ -457,6 +457,12 @@ impl crate::memory::AddressSpace for Mace {
 
     fn contains(&self, addr: u32) -> bool {
         addr < 0x400000 // MACE address space is 4MB (0x1F000000 - 0x1F3FFFFF)
+    }
+}
+
+impl Default for Mace {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1096,6 +1102,34 @@ impl UartState {
             0x1C => self.scr = val, // SCR
             _ => {
                 log::warn!("UART write32: unimplemented offset 0x{:04X} = 0x{:08X}", offset, value);
+            }
+        }
+    }
+
+    /// Read a 32-bit register from UART (immutable version for read-only access).
+    /// This does not modify any state (no console reads, no LSR changes).
+    pub fn read32_immutable(&self, offset: u32) -> u32 {
+        let reg_offset = offset & 0x1F;
+        match reg_offset {
+            0x00 => { // RBR / DLL (DLAB=1)
+                if self.dlab {
+                    self.dll as u32
+                } else {
+                    self.rbr as u32
+                }
+            }
+            0x04 => { // IER / DLM (DLAB=1)
+                if self.dlab { self.dlm as u32 } else { self.ier as u32 }
+            }
+            0x08 => self.iir as u32, // IIR
+            0x0C => self.lcr as u32, // LCR
+            0x10 => self.mcr as u32, // MCR
+            0x14 => self.lsr as u32, // LSR
+            0x18 => self.msr as u32, // MSR
+            0x1C => self.scr as u32, // SCR
+            _ => {
+                log::warn!("UART read32_immutable: unimplemented offset 0x{:04X}", offset);
+                0
             }
         }
     }
