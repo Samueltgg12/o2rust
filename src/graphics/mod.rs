@@ -148,6 +148,34 @@ pub struct CrimeCpuInterface {
     mem_error_ecc_repl: u32,
 }
 
+impl Default for CrimeCpuInterface {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            control: 0,
+            intstat: 0,
+            intmask: 0,
+            softint: 0,
+            hardint: 0,
+            dog: 0,
+            time_lo: 0,
+            time_hi: 0,
+            cpu_error_addr: 0,
+            cpu_error_stat: 0,
+            cpu_error_ena: 0,
+            vice_error_addr: 0,
+            mem_control: 0,
+            mem_bank_ctrl: [0; 8],
+            mem_refresh_cntr: 0,
+            mem_error_stat: 0,
+            mem_error_addr: 0,
+            mem_error_ecc_syn: 0,
+            mem_error_ecc_chk: 0,
+            mem_error_ecc_repl: 0,
+        }
+    }
+}
+
 impl CrimeCpuInterface {
     /// Create a new CRIME CPU Interface.
     pub fn new() -> Self {
@@ -879,10 +907,10 @@ impl AddressSpace for RenderEngine {
 
         match page {
             re_page::INTFBUF => {
-                if offset >= intfbuf::DATA && offset <= intfbuf::DATA + 252 {
+                if offset >= intfbuf::DATA && offset <= intfbuf::DATA_END {
                     let idx = ((offset - intfbuf::DATA) / 4) as usize;
                     if idx < 64 { self.intfbuf_data[idx] = value; }
-                } else if offset >= intfbuf::ADDR && offset <= intfbuf::ADDR + 252 {
+                } else if offset >= intfbuf::ADDR && offset <= intfbuf::ADDR_END {
                     let idx = ((offset - intfbuf::ADDR) / 4) as usize;
                     if idx < 64 { self.intfbuf_addr[idx] = value; }
                 } else if offset == intfbuf::CTL {
