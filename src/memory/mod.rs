@@ -94,6 +94,119 @@ impl MemoryMap {
         Self::new(ram_mb, uart1_tx, uart1_rx, uart2_tx)
     }
 
+    /// Render the GBE framebuffer into a linear RGBA8 buffer.
+    ///
+    /// The GBE framebuffer is **tile-based**, not linear. Tiles are 64 KiB
+    /// (128 lines × 512 bytes), aligned on 64 KiB boundaries. The pixel width
+    /// of a tile depends on the pixel depth:
+    ///
+    /// | depth | bytes/pixel | pixels per tile row |
+    /// |-------|-------------|---------------------|
+    /// | 8bpp  | 1           | 512                 |
+    /// | 16bpp | 2           | 256                 |
+    /// | 32bpp | 4           | 128                 |
+    ///
+    /// The `tile_list_ptr` register points to a list of 16-bit entries (the
+    /// upper 16 bits of each tile's physical address), ordered top-to-bottom,
+    /// left-to-right. Pixels are big-endian within the 256-bit memory width.
+    ///
+    /// `out` must be at least `width * height * 4` bytes. Returns the number
+    /// of pixels written (width × height).
+    pub fn render_framebuffer(&self, out: &mut [u8]) -> usize {
+        let width = self.gbe.width() as usize;
+        let height = self.gbe.height() as usize;
+        let depth = self.gbe.depth();
+
+        // Bytes per pixel and pixels per tile row from the depth code.
+        let (bytes_per_pixel, pixels_per_tile_row): (usize, usize) = match depth {
+            0 => (1, 512), // 8bpp
+            1 => (2, 256), // 16bpp
+            2 => (4, 128), // 32bpp
+            _ => (4, 128), // unknown → treat as 32bpp
+        };
+
+        const TILE_LINES: usize = 128;
+        const TILE_ROW_BYTES: usize = 512;
+
+        let tiles_per_row = width.div_ceil(pixels_per_tile_row);
+        let tile_list_ptr = self.gbe.tile_list_ptr as usize;
+
+        let ram = self.ram.as_slice();
+        let required = width * height * 4;
+        if out.len() < required {
+            return 0;
+        }
+
+        for y in 0..height {
+            let tile_y = y / TILE_LINES;
+            let line_in_tile = y % TILE_LINES;
+            for x in 0..width {
+                let tile_x = x / pixels_per_tile_row;
+                let px_in_tile = x % pixels_per_tile_row;
+
+                let tile_index = tile_y * tiles_per_row + tile_x;
+
+                // Read the 16-bit tile pointer (upper 16 bits of the tile's
+                // physical address) from the tile pointer list in main memory.
+                let ptr_off = tile_list_ptr + tile_index * 2;
+                let tile_ptr = if ptr_off + 2 <= ram.len() {
+                    ((ram[ptr_off] as u32) << 8) | (ram[ptr_off + 1] as u32)
+                } else {
+                    0
+                };
+
+                // Physical address of the pixel within the tile.
+                let tile_base = (tile_ptr << 16) as usize;
+                let px_off = tile_base
+                    + line_in_tile * TILE_ROW_BYTES
+                    + px_in_tile * bytes_per_pixel;
+
+                // Read the pixel (big-endian) and expand to RGBA8.
+                let (r, g, b) = if px_off + bytes_per_pixel <= ram.len() {
+                    match depth {
+                        0 => {
+                            // 8bpp: index into the GBE color map (cmap).
+                            let idx = ram[px_off] as usize;
+                            let entry = self.gbe.cmap_entry(idx);
+                            (entry.0, entry.1, entry.2)
+                        }
+                        1 => {
+                            // 16bpp: RGB565 (big-endian).
+                            let v = ((ram[px_off] as u16) << 8) | (ram[px_off + 1] as u16);
+                            let r = ((v >> 11) & 0x1f) as u8;
+                            let g = ((v >> 5) & 0x3f) as u8;
+                            let b = (v & 0x1f) as u8;
+                            (
+                                (r << 3) | (r >> 2),
+                                (g << 2) | (g >> 4),
+                                (b << 3) | (b >> 2),
+                            )
+                        }
+                        _ => {
+                            // 32bpp: ARGB8888 (big-endian).
+                            let a = ram[px_off];
+                            let r = ram[px_off + 1];
+                            let g = ram[px_off + 2];
+                            let b = ram[px_off + 3];
+                            let _ = a;
+                            (r, g, b)
+                        }
+                    }
+                } else {
+                    (0, 0, 0)
+                };
+
+                let out_off = (y * width + x) * 4;
+                out[out_off] = r;
+                out[out_off + 1] = g;
+                out[out_off + 2] = b;
+                out[out_off + 3] = 0xff;
+            }
+        }
+
+        width * height
+    }
+
     /// Read a 32-bit word from the physical address space.
     pub fn read32(&mut self, addr: u32) -> u32 {
         match addr {

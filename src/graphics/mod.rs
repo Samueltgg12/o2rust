@@ -1291,6 +1291,27 @@ impl GbeDisplayEngine {
     pub fn depth(&self) -> u32 {
         (self.frm_size_tile >> 13) & 0x3
     }
+
+    /// Get the framebuffer tile list pointer (physical address of the tile
+    /// pointer list in main memory).
+    pub fn tile_list_ptr(&self) -> u32 {
+        self.tile_list_ptr
+    }
+
+    /// Get a color map entry as an (r, g, b) tuple.
+    ///
+    /// The GBE color map holds 4608 entries. Each entry is a 32-bit word
+    /// encoding 8-bit RGB (the exact packing is `0x00RRGGBB` big-endian).
+    pub fn cmap_entry(&self, index: usize) -> (u8, u8, u8) {
+        if index >= self.cmap.len() {
+            return (0, 0, 0);
+        }
+        let v = self.cmap[index];
+        let r = ((v >> 16) & 0xff) as u8;
+        let g = ((v >> 8) & 0xff) as u8;
+        let b = (v & 0xff) as u8;
+        (r, g, b)
+    }
 }
 
 impl AddressSpace for GbeDisplayEngine {
