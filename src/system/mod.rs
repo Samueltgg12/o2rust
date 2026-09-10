@@ -137,4 +137,22 @@ impl Emulator {
     pub fn pc(&self) -> u32 {
         self.cpu.state.pc
     }
+
+    /// Render the GBE framebuffer into a linear RGBA8 buffer.
+    ///
+    /// `out` must be at least `width * height * 4` bytes. Returns the number
+    /// of pixels written (width × height), or 0 if `out` is too small.
+    pub fn render_framebuffer(&self, out: &mut [u8]) -> usize {
+        self.memory.render_framebuffer(out)
+    }
+
+    /// The current framebuffer width in pixels.
+    pub fn framebuffer_width(&self) -> usize {
+        self.memory.gbe.width() as usize
+    }
+
+    /// The current framebuffer height in pixels.
+    pub fn framebuffer_height(&self) -> usize {
+        self.memory.gbe.height() as usize
+    }
 }
