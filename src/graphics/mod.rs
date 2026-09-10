@@ -608,6 +608,59 @@ pub struct RenderEngine {
     set_start_ptr: u32,
 }
 
+impl Default for RenderEngine {
+    fn default() -> Self {
+        Self {
+            intfbuf_data: [0; 64],
+            intfbuf_addr: [0; 64],
+            intfbuf_ctl: 0,
+            tlb_fb_a: [0; 64],
+            tlb_fb_b: [0; 64],
+            tlb_fb_c: [0; 64],
+            tlb_texture: [0; 28],
+            tlb_cid: [0; 4],
+            tlb_linear_a: [0; 16],
+            tlb_linear_b: [0; 16],
+            buf_mode_src: 0,
+            buf_mode_dst: 0,
+            clip_mode: 0,
+            draw_mode: 0,
+            scissor: 0,
+            win_offset_src: 0,
+            win_offset_dst: 0,
+            primitive: 0,
+            vertex_x: [0; 3],
+            vertex_gl: [0; 3],
+            start_setup: 0,
+            pixel_xfer_src: 0,
+            pixel_xfer_dst: 0,
+            stipple: 0,
+            shade: [0; 12],
+            texture: [0; 23],
+            fog: 0,
+            antialias: 0,
+            alpha_test: 0,
+            blend: 0,
+            logic_op: 0,
+            color_mask: 0,
+            depth: 0,
+            stencil: 0,
+            mte_mode: 0,
+            mte_bytemask: 0,
+            mte_stipplemask: 0,
+            mte_fgvalue: 0,
+            mte_src0: 0,
+            mte_src1: 0,
+            mte_dst0: 0,
+            mte_dst1: 0,
+            mte_srcystep: 0,
+            mte_dstystep: 0,
+            status: 0,
+            set_start_ptr: 0,
+        }
+    }
+}
+
 impl RenderEngine {
     pub fn new() -> Self {
         Self::default()
