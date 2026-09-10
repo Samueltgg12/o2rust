@@ -303,6 +303,13 @@ impl R5000 {
                 let v = self.state.gpr(rt) << shamt;
                 self.state.set_gpr(rd, v);
             }
+            0x01 => {
+                // MOVCI (MIPS IV) - Move Conditional Integer
+                // if GPR[rt] != 0 then GPR[rd] = GPR[rs]
+                if self.state.gpr(rt) != 0 {
+                    self.state.set_gpr(rd, self.state.gpr(rs));
+                }
+            }
             0x02 => {
                 // SRL
                 let v = self.state.gpr(rt) >> shamt;
