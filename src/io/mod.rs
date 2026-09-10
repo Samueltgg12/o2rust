@@ -276,7 +276,7 @@ pub mod vout {
 }
 
 /// MACE ASIC state.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Mace {
     /// PCI Host Bridge state
     pub pci: PciState,
@@ -295,14 +295,45 @@ pub struct Mace {
 }
 
 impl Mace {
-    /// Create a new MACE ASIC.
+    /// Create a new MACE ASIC with console I/O channels for UARTs.
+    pub fn with_console(
+        uart1_tx: std::sync::mpsc::Sender<u8>,
+        uart1_rx: std::sync::mpsc::Receiver<u8>,
+        uart2_tx: std::sync::mpsc::Sender<u8>,
+        uart2_rx: std::sync::mpsc::Receiver<u8>,
+    ) -> Self {
+        Self {
+            pci: PciState::default(),
+            enet: EnetState::default(),
+            perif: PerifState::default(),
+            isa_ext: IsaExtState::with_console(uart1_tx, uart1_rx, uart2_tx, uart2_rx),
+            vin1: VinState::default(),
+            vin2: VinState::default(),
+            vout: VinState::default(),
+        }
+    }
+
+    /// Create a new MACE ASIC (without console I/O).
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            pci: PciState::default(),
+            enet: EnetState::default(),
+            perif: PerifState::default(),
+            isa_ext: IsaExtState::with_console(
+                std::sync::mpsc::channel().0,
+                std::sync::mpsc::channel().1,
+                std::sync::mpsc::channel().0,
+                std::sync::mpsc::channel().1,
+            ),
+            vin1: VinState::default(),
+            vin2: VinState::default(),
+            vout: VinState::default(),
+        }
     }
 
     /// Reset the MACE ASIC.
     pub fn reset(&mut self) {
-        *self = Self::default();
+        *self = Self::new();
     }
 
     /// Read a 32-bit register from MACE.
@@ -834,7 +865,7 @@ impl IsaExtState {
         }
     }
 
-    pub fn read32(&self, offset: u32) -> u32 {
+    pub fn read32(&mut self, offset: u32) -> u32 {
         match offset {
             offset if offset >= isa_ext::epp::BASE && offset <= isa_ext::epp::BASE + 0xFF => self.epp.read32(offset - isa_ext::epp::BASE),
             offset if offset >= isa_ext::ecp::BASE && offset <= isa_ext::ecp::BASE + 0xFF => self.ecp.read32(offset - isa_ext::ecp::BASE),
@@ -844,6 +875,22 @@ impl IsaExtState {
             offset if offset >= isa_ext::game::BASE && offset <= isa_ext::game::BASE + 0xFF => self.game.read32(offset - isa_ext::game::BASE),
             _ => {
                 log::warn!("ISA_EXT read32: unimplemented offset 0x{:05X}", offset);
+                0
+            }
+        }
+    }
+
+    /// Read a 32-bit register from ISA_EXT (immutable version for read-only access).
+    pub fn read32_immutable(&self, offset: u32) -> u32 {
+        match offset {
+            offset if offset >= isa_ext::epp::BASE && offset <= isa_ext::epp::BASE + 0xFF => self.epp.read32(offset - isa_ext::epp::BASE),
+            offset if offset >= isa_ext::ecp::BASE && offset <= isa_ext::ecp::BASE + 0xFF => self.ecp.read32(offset - isa_ext::ecp::BASE),
+            offset if offset >= isa_ext::uart1::BASE && offset <= isa_ext::uart1::BASE + 0xFF => self.uart1.read32_immutable(offset - isa_ext::uart1::BASE),
+            offset if offset >= isa_ext::uart2::BASE && offset <= isa_ext::uart2::BASE + 0xFF => self.uart2.read32_immutable(offset - isa_ext::uart2::BASE),
+            offset if offset >= isa_ext::rtc::BASE && offset <= isa_ext::rtc::BASE + 0xFF => self.rtc.read32(offset - isa_ext::rtc::BASE),
+            offset if offset >= isa_ext::game::BASE && offset <= isa_ext::game::BASE + 0xFF => self.game.read32(offset - isa_ext::game::BASE),
+            _ => {
+                log::warn!("ISA_EXT read32_immutable: unimplemented offset 0x{:05X}", offset);
                 0
             }
         }

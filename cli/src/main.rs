@@ -7,6 +7,9 @@
 use anyhow::Result;
 use clap::Parser;
 use o2rust::system::Emulator;
+use std::io::{self, Read, Write};
+use std::sync::mpsc;
+use std::thread;
 
 /// O2Rust — an accurate & fast SGI O2 (IP32) emulator.
 #[derive(Parser, Debug)]
@@ -41,7 +44,45 @@ fn main() -> Result<()> {
 
     o2rust::log::info_msg(&format!("O2Rust v{} — CLI", o2rust::VERSION));
 
-    let mut emulator = Emulator::with_ram(args.ram_mb);
+    // Create console channels for UART1 (console) and UART2
+    let (uart1_tx, uart1_rx) = mpsc::channel::<u8>();
+    let (uart2_tx, uart2_rx) = mpsc::channel::<u8>();
+
+    // Spawn thread to read from stdin and send to UART1 (console input)
+    thread::spawn(move || {
+        let mut stdin = io::stdin();
+        let mut buf = [0u8; 1];
+        loop {
+            match stdin.read_exact(&mut buf) {
+                Ok(_) => {
+                    if uart1_tx.send(buf[0]).is_err() {
+                        break; // Channel closed, exit thread
+                    }
+                }
+                Err(_) => break, // EOF or error, exit thread
+            }
+        }
+    });
+
+    // Spawn thread to read from UART2 (console output) and write to stdout
+    thread::spawn(move || {
+        let mut stdout = io::stdout();
+        loop {
+            match uart2_rx.recv() {
+                Ok(byte) => {
+                    if stdout.write_all(&[byte]).is_err() {
+                        break;
+                    }
+                    if stdout.flush().is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break, // Channel closed, exit thread
+            }
+        }
+    });
+
+    let mut emulator = Emulator::with_ram(args.ram_mb, uart1_tx, uart1_rx, uart2_tx, uart2_rx);
     emulator.load_prom(&args.prom)?;
 
     o2rust::log::info_msg(&format!(

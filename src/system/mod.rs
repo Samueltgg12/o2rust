@@ -35,24 +35,39 @@ impl Default for Emulator {
 impl Emulator {
     /// Create a new emulator with `ram_mb` megabytes of RAM.
     pub fn new() -> Self {
+        let (uart1_tx, uart1_rx) = std::sync::mpsc::channel();
+        let (uart2_tx, uart2_rx) = std::sync::mpsc::channel();
         Self {
             cpu: R5000::new(),
-            memory: MemoryMap::new(256),
+            memory: MemoryMap::new(256, uart1_tx, uart1_rx, uart2_tx, uart2_rx),
             prom: None,
             model: CpuModel::R5000,
             running: false,
         }
     }
 
-    /// Create a new emulator with a specific amount of RAM (in MB).
-    pub fn with_ram(ram_mb: u32) -> Self {
+    /// Create a new emulator with a specific amount of RAM (in MB) and console I/O channels for UARTs.
+    pub fn with_ram(
+        ram_mb: u32,
+        uart1_tx: std::sync::mpsc::Sender<u8>,
+        uart1_rx: std::sync::mpsc::Receiver<u8>,
+        uart2_tx: std::sync::mpsc::Sender<u8>,
+        uart2_rx: std::sync::mpsc::Receiver<u8>,
+    ) -> Self {
         Self {
             cpu: R5000::new(),
-            memory: MemoryMap::new(ram_mb),
+            memory: MemoryMap::new(ram_mb, uart1_tx, uart1_rx, uart2_tx, uart2_rx),
             prom: None,
             model: CpuModel::R5000,
             running: false,
         }
+    }
+
+    /// Create a new emulator with a specific amount of RAM (in MB) without console I/O.
+    pub fn with_ram_no_console(ram_mb: u32) -> Self {
+        let (uart1_tx, uart1_rx) = std::sync::mpsc::channel();
+        let (uart2_tx, uart2_rx) = std::sync::mpsc::channel();
+        Self::with_ram(ram_mb, uart1_tx, uart1_rx, uart2_tx, uart2_rx)
     }
 
     /// Load a PROM image from a file and map it into memory.
