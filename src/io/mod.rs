@@ -296,17 +296,18 @@ pub struct Mace {
 
 impl Mace {
     /// Create a new MACE ASIC with console I/O channels for UARTs.
+    /// UART1 is used for console input/output (bidirectional).
+    /// UART2 is used for console output only (tx only).
     pub fn with_console(
         uart1_tx: std::sync::mpsc::Sender<u8>,
         uart1_rx: std::sync::mpsc::Receiver<u8>,
         uart2_tx: std::sync::mpsc::Sender<u8>,
-        uart2_rx: std::sync::mpsc::Receiver<u8>,
     ) -> Self {
         Self {
             pci: PciState::default(),
             enet: EnetState::default(),
             perif: PerifState::default(),
-            isa_ext: IsaExtState::with_console(uart1_tx, uart1_rx, uart2_tx, uart2_rx),
+            isa_ext: IsaExtState::with_console(uart1_tx, uart1_rx, uart2_tx),
             vin1: VinState::default(),
             vin2: VinState::default(),
             vout: VinState::default(),
@@ -315,20 +316,9 @@ impl Mace {
 
     /// Create a new MACE ASIC (without console I/O).
     pub fn new() -> Self {
-        Self {
-            pci: PciState::default(),
-            enet: EnetState::default(),
-            perif: PerifState::default(),
-            isa_ext: IsaExtState::with_console(
-                std::sync::mpsc::channel().0,
-                std::sync::mpsc::channel().1,
-                std::sync::mpsc::channel().0,
-                std::sync::mpsc::channel().1,
-            ),
-            vin1: VinState::default(),
-            vin2: VinState::default(),
-            vout: VinState::default(),
-        }
+        let (uart1_tx, uart1_rx) = std::sync::mpsc::channel();
+        let (uart2_tx, _uart2_rx) = std::sync::mpsc::channel();
+        Self::with_console(uart1_tx, uart1_rx, uart2_tx)
     }
 
     /// Reset the MACE ASIC.
