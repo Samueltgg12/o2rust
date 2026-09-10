@@ -122,7 +122,7 @@ mod crime_mem_error {
 }
 
 /// CRIME CPU Interface (Microprocessor) state.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct CrimeCpuInterface {
     // Core registers
     id: u32,
