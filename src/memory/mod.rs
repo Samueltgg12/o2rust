@@ -129,7 +129,7 @@ impl MemoryMap {
         const TILE_ROW_BYTES: usize = 512;
 
         let tiles_per_row = width.div_ceil(pixels_per_tile_row);
-        let tile_list_ptr = self.gbe.tile_list_ptr as usize;
+        let tile_list_ptr = self.gbe.tile_list_ptr() as usize;
 
         let ram = self.ram.as_slice();
         let required = width * height * 4;
