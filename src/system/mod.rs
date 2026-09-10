@@ -39,7 +39,7 @@ impl Emulator {
         let (uart2_tx, uart2_rx) = std::sync::mpsc::channel();
         Self {
             cpu: R5000::new(),
-            memory: MemoryMap::new(256, uart1_tx, uart1_rx, uart2_tx, uart2_rx),
+            memory: MemoryMap::new(256, uart1_tx, uart1_rx, uart2_tx),
             prom: None,
             model: CpuModel::R5000,
             running: false,
@@ -68,7 +68,7 @@ impl Emulator {
     pub fn with_ram_no_console(ram_mb: u32) -> Self {
         let (uart1_tx, uart1_rx) = std::sync::mpsc::channel();
         let (uart2_tx, uart2_rx) = std::sync::mpsc::channel();
-        Self::with_ram(ram_mb, uart1_tx, uart1_rx, uart2_tx, uart2_rx)
+        Self::with_ram(ram_mb, uart1_tx, uart1_rx, uart2_tx)
     }
 
     /// Load a PROM image from a file and map it into memory.

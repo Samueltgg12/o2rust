@@ -68,6 +68,7 @@ fn main() -> Result<()> {
     });
 
     // Spawn thread to read from UART2 (console output) and write to stdout
+    // uart2_rx is moved into this thread (not needed by emulator)
     thread::spawn(move || {
         let mut stdout = io::stdout();
         loop {
@@ -85,6 +86,7 @@ fn main() -> Result<()> {
         }
     });
 
+    // Emulator only needs uart1_tx, uart1_rx, uart2_tx (not uart2_rx)
     let mut emulator = Emulator::with_ram(args.ram_mb, uart1_tx, uart1_rx, uart2_tx);
     emulator.load_prom(&args.prom)?;
 

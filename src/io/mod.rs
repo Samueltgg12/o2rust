@@ -845,17 +845,19 @@ pub struct IsaExtState {
 
 impl IsaExtState {
     /// Create a new ISA External block state with console I/O channels for UARTs.
+    /// UART1 is used for console input/output (bidirectional).
+    /// UART2 is used for console output only (tx only).
     pub fn with_console(
         uart1_tx: std::sync::mpsc::Sender<u8>,
         uart1_rx: std::sync::mpsc::Receiver<u8>,
         uart2_tx: std::sync::mpsc::Sender<u8>,
-        uart2_rx: std::sync::mpsc::Receiver<u8>,
     ) -> Self {
+        let (_uart2_tx_dummy, uart2_rx_dummy) = std::sync::mpsc::channel();
         Self {
             epp: EppState::default(),
             ecp: EcpState::default(),
             uart1: UartState::with_console(uart1_tx, uart1_rx),
-            uart2: UartState::with_console(uart2_tx, uart2_rx),
+            uart2: UartState::with_console(uart2_tx, uart2_rx_dummy),
             rtc: RtcState::default(),
             game: GameState::default(),
         }
