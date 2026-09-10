@@ -67,12 +67,13 @@ pub struct MemoryMap {
 
 impl MemoryMap {
     /// Create a new memory map with `ram_mb` megabytes of RAM and console I/O channels for UARTs.
+    /// UART1 is used for console input/output (bidirectional).
+    /// UART2 is used for console output only (tx only).
     pub fn new(
         ram_mb: u32,
         uart1_tx: std::sync::mpsc::Sender<u8>,
         uart1_rx: std::sync::mpsc::Receiver<u8>,
         uart2_tx: std::sync::mpsc::Sender<u8>,
-        uart2_rx: std::sync::mpsc::Receiver<u8>,
     ) -> Self {
         let ram_size = ram_mb.min(ip32::MAX_MEMORY / (1024 * 1024)) * 1024 * 1024;
         Self {
@@ -82,15 +83,15 @@ impl MemoryMap {
             ice: Ice::new(),
             render_engine: RenderEngine::new(),
             gbe: GbeDisplayEngine::new(),
-            mace: Mace::with_console(uart1_tx, uart1_rx, uart2_tx, uart2_rx),
+            mace: Mace::with_console(uart1_tx, uart1_rx, uart2_tx),
         }
     }
 
     /// Create a new memory map with `ram_mb` megabytes of RAM (without console I/O).
     pub fn new_without_console(ram_mb: u32) -> Self {
         let (uart1_tx, uart1_rx) = std::sync::mpsc::channel();
-        let (uart2_tx, uart2_rx) = std::sync::mpsc::channel();
-        Self::new(ram_mb, uart1_tx, uart1_rx, uart2_tx, uart2_rx)
+        let (uart2_tx, _uart2_rx) = std::sync::mpsc::channel();
+        Self::new(ram_mb, uart1_tx, uart1_rx, uart2_tx)
     }
 
     /// Read a 32-bit word from the physical address space.
