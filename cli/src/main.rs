@@ -16,7 +16,7 @@ use std::thread;
 #[command(name = "o2rust-cli", version, about)]
 struct Args {
     /// Path to the IP32 PROM image (e.g. samples/ip32prom.rev4.18.bin).
-    #[arg(short, long, default_value = "samples/ip32prom.rev4.18.bin")]
+    #[arg(index = 1, default_value = "samples/ip32prom.rev4.18.bin")]
     prom: String,
 
     /// Amount of RAM in megabytes.
