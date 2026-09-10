@@ -47,16 +47,17 @@ impl Emulator {
     }
 
     /// Create a new emulator with a specific amount of RAM (in MB) and console I/O channels for UARTs.
+    /// UART1 is used for console input/output (bidirectional).
+    /// UART2 is used for console output only (tx only).
     pub fn with_ram(
         ram_mb: u32,
         uart1_tx: std::sync::mpsc::Sender<u8>,
         uart1_rx: std::sync::mpsc::Receiver<u8>,
         uart2_tx: std::sync::mpsc::Sender<u8>,
-        uart2_rx: std::sync::mpsc::Receiver<u8>,
     ) -> Self {
         Self {
             cpu: R5000::new(),
-            memory: MemoryMap::new(ram_mb, uart1_tx, uart1_rx, uart2_tx, uart2_rx),
+            memory: MemoryMap::new(ram_mb, uart1_tx, uart1_rx, uart2_tx),
             prom: None,
             model: CpuModel::R5000,
             running: false,
