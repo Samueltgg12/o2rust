@@ -463,8 +463,10 @@ mod re_page {
 
 /// Interface Buffer registers (page 0).
 mod intfbuf {
-    pub const DATA: u32 = 0x000; // data[64] - 128 bytes
-    pub const ADDR: u32 = 0x200; // addr[64] - 128 bytes
+    pub const DATA: u32 = 0x000; // data[64] - 256 bytes
+    pub const DATA_END: u32 = 0x0FC; // DATA + 252 (63 * 4)
+    pub const ADDR: u32 = 0x200; // addr[64] - 256 bytes
+    pub const ADDR_END: u32 = 0x2FC; // ADDR + 252 (63 * 4)
     pub const CTL: u32 = 0x400;
     pub const RESET: u32 = 0x408;
 }
@@ -713,11 +715,11 @@ impl AddressSpace for RenderEngine {
 
         match page {
             re_page::INTFBUF => match offset {
-                intfbuf::DATA..=intfbuf::DATA + 252 => {
+                intfbuf::DATA..=intfbuf::DATA_END => {
                     let idx = ((offset - intfbuf::DATA) / 4) as usize;
                     if idx < 64 { self.intfbuf_data[idx] } else { 0 }
                 }
-                intfbuf::ADDR..=intfbuf::ADDR + 252 => {
+                intfbuf::ADDR..=intfbuf::ADDR_END => {
                     let idx = ((offset - intfbuf::ADDR) / 4) as usize;
                     if idx < 64 { self.intfbuf_addr[idx] } else { 0 }
                 }
