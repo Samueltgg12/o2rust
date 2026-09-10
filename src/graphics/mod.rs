@@ -316,7 +316,9 @@ mod ice {
     pub const VICE_INTSTAT: u32 = 0x18;
     pub const VICE_INTMASK: u32 = 0x20;
     pub const VICE_CMD_FIFO: u32 = 0x100; // Command FIFO
+    pub const VICE_CMD_FIFO_END: u32 = 0x1FC; // VICE_CMD_FIFO + 252 (63 * 4)
     pub const VICE_DATA_FIFO: u32 = 0x200; // Data FIFO
+    pub const VICE_DATA_FIFO_END: u32 = 0x2FC; // VICE_DATA_FIFO + 252 (63 * 4)
 }
 
 /// ICE state.
@@ -382,7 +384,7 @@ impl AddressSpace for Ice {
             ice::VICE_STATUS => self.status,
             ice::VICE_INTSTAT => self.intstat,
             ice::VICE_INTMASK => self.intmask,
-            a if (ice::VICE_CMD_FIFO..=ice::VICE_CMD_FIFO + 252).contains(&a) => {
+            a if (ice::VICE_CMD_FIFO..=ice::VICE_CMD_FIFO_END).contains(&a) => {
                 if self.cmd_fifo_head != self.cmd_fifo_tail {
                     let val = self.cmd_fifo[self.cmd_fifo_tail];
                     self.cmd_fifo_tail = (self.cmd_fifo_tail + 1) % 64;
@@ -391,7 +393,7 @@ impl AddressSpace for Ice {
                     0
                 }
             }
-            a if (ice::VICE_DATA_FIFO..=ice::VICE_DATA_FIFO + 252).contains(&a) => {
+            a if (ice::VICE_DATA_FIFO..=ice::VICE_DATA_FIFO_END).contains(&a) => {
                 if self.data_fifo_head != self.data_fifo_tail {
                     let val = self.data_fifo[self.data_fifo_tail];
                     self.data_fifo_tail = (self.data_fifo_tail + 1) % 64;
@@ -420,14 +422,14 @@ impl AddressSpace for Ice {
             ice::VICE_INTMASK => {
                 self.intmask = value;
             }
-            ice::VICE_CMD_FIFO..=ice::VICE_CMD_FIFO + 252 => {
+            ice::VICE_CMD_FIFO..=ice::VICE_CMD_FIFO_END => {
                 let next = (self.cmd_fifo_head + 1) % 64;
                 if next != self.cmd_fifo_tail {
                     self.cmd_fifo[self.cmd_fifo_head] = value;
                     self.cmd_fifo_head = next;
                 }
             }
-            ice::VICE_DATA_FIFO..=ice::VICE_DATA_FIFO + 252 => {
+            ice::VICE_DATA_FIFO..=ice::VICE_DATA_FIFO_END => {
                 let next = (self.data_fifo_head + 1) % 64;
                 if next != self.data_fifo_tail {
                     self.data_fifo[self.data_fifo_head] = value;
@@ -470,12 +472,19 @@ mod intfbuf {
 /// TLB registers (page 1).
 mod tlb {
     pub const FB_A: u32 = 0x000;    // 64 entries * 8 bytes = 512 bytes
+    pub const FB_A_END: u32 = 0x1F8; // FB_A + 504 (63 * 8)
     pub const FB_B: u32 = 0x200;    // 64 entries
+    pub const FB_B_END: u32 = 0x3F8; // FB_B + 504 (63 * 8)
     pub const FB_C: u32 = 0x400;    // 64 entries
+    pub const FB_C_END: u32 = 0x5F8; // FB_C + 504 (63 * 8)
     pub const TEXTURE: u32 = 0x600; // 28 entries
+    pub const TEXTURE_END: u32 = 0x6D8; // TEXTURE + 216 (27 * 8)
     pub const CID: u32 = 0x6e0;     // 4 entries
+    pub const CID_END: u32 = 0x6F8; // CID + 24 (3 * 8)
     pub const LINEAR_A: u32 = 0x700; // 16 entries
+    pub const LINEAR_A_END: u32 = 0x778; // LINEAR_A + 120 (15 * 8)
     pub const LINEAR_B: u32 = 0x780; // 16 entries
+    pub const LINEAR_B_END: u32 = 0x7F8; // LINEAR_B + 120 (15 * 8)
 }
 
 /// Pixel Pipe / Draw registers (page 2).
@@ -719,31 +728,31 @@ impl AddressSpace for RenderEngine {
             re_page::TLB => {
                 // TLB entries are 64-bit (2x32), return low 32 bits
                 match offset {
-                    tlb::FB_A..=tlb::FB_A + 504 => {
+                    tlb::FB_A..=tlb::FB_A_END => {
                         let idx = ((offset - tlb::FB_A) / 8) as usize;
                         if idx < 64 { self.tlb_fb_a[idx] as u32 } else { 0 }
                     }
-                    tlb::FB_B..=tlb::FB_B + 504 => {
+                    tlb::FB_B..=tlb::FB_B_END => {
                         let idx = ((offset - tlb::FB_B) / 8) as usize;
                         if idx < 64 { self.tlb_fb_b[idx] as u32 } else { 0 }
                     }
-                    tlb::FB_C..=tlb::FB_C + 504 => {
+                    tlb::FB_C..=tlb::FB_C_END => {
                         let idx = ((offset - tlb::FB_C) / 8) as usize;
                         if idx < 64 { self.tlb_fb_c[idx] as u32 } else { 0 }
                     }
-                    tlb::TEXTURE..=tlb::TEXTURE + 216 => {
+                    tlb::TEXTURE..=tlb::TEXTURE_END => {
                         let idx = ((offset - tlb::TEXTURE) / 8) as usize;
                         if idx < 28 { self.tlb_texture[idx] as u32 } else { 0 }
                     }
-                    tlb::CID..=tlb::CID + 24 => {
+                    tlb::CID..=tlb::CID_END => {
                         let idx = ((offset - tlb::CID) / 8) as usize;
                         if idx < 4 { self.tlb_cid[idx] as u32 } else { 0 }
                     }
-                    tlb::LINEAR_A..=tlb::LINEAR_A + 120 => {
+                    tlb::LINEAR_A..=tlb::LINEAR_A_END => {
                         let idx = ((offset - tlb::LINEAR_A) / 8) as usize;
                         if idx < 16 { self.tlb_linear_a[idx] as u32 } else { 0 }
                     }
-                    tlb::LINEAR_B..=tlb::LINEAR_B + 120 => {
+                    tlb::LINEAR_B..=tlb::LINEAR_B_END => {
                         let idx = ((offset - tlb::LINEAR_B) / 8) as usize;
                         if idx < 16 { self.tlb_linear_b[idx] as u32 } else { 0 }
                     }
