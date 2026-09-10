@@ -46,6 +46,24 @@ cranelift = "0.135.1"
 cranelift-module = "0.135.1"
 cranelift-jit = "0.135.1"
 
+# Windowing & input
+winit = "0.30"
+raw-window-handle = "0.6"
+
+# OpenGL context (glutin + glutin-winit)
+glutin = "0.32"
+glutin-winit = "0.5"
+
+# Audio (cpal) + low-latency ring buffer (rtrb)
+cpal = "0.18.2"
+rtrb = "0.4.0"
+
+# File dialogs (rfd)
+rfd = "0.17.2"
+
+# CHD disk image support
+libchdman-rs = { version = "0.289", features = ["prebuilt"] }
+
 [profile.release]
 opt-level = 3
 lto = "thin"
