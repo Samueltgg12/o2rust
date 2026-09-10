@@ -806,7 +806,7 @@ impl UstMscState {
 }
 
 /// ISA External block state.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct IsaExtState {
     pub epp: EppState,
     pub ecp: EcpState,
@@ -817,6 +817,23 @@ pub struct IsaExtState {
 }
 
 impl IsaExtState {
+    /// Create a new ISA External block state with console I/O channels for UARTs.
+    pub fn with_console(
+        uart1_tx: std::sync::mpsc::Sender<u8>,
+        uart1_rx: std::sync::mpsc::Receiver<u8>,
+        uart2_tx: std::sync::mpsc::Sender<u8>,
+        uart2_rx: std::sync::mpsc::Receiver<u8>,
+    ) -> Self {
+        Self {
+            epp: EppState::default(),
+            ecp: EcpState::default(),
+            uart1: UartState::with_console(uart1_tx, uart1_rx),
+            uart2: UartState::with_console(uart2_tx, uart2_rx),
+            rtc: RtcState::default(),
+            game: GameState::default(),
+        }
+    }
+
     pub fn read32(&self, offset: u32) -> u32 {
         match offset {
             offset if offset >= isa_ext::epp::BASE && offset <= isa_ext::epp::BASE + 0xFF => self.epp.read32(offset - isa_ext::epp::BASE),
@@ -938,15 +955,56 @@ pub struct UartState {
     pub dlm: u8,   // Divisor Latch High
     // Internal state
     pub dlab: bool,
+    // Console I/O support
+    pub console_tx: Option<std::sync::mpsc::Sender<u8>>,
+    pub console_rx: Option<std::sync::mpsc::Receiver<u8>>,
 }
 
 impl UartState {
-    pub fn read32(&self, offset: u32) -> u32 {
+    /// Create a new UART state with console I/O channels.
+    pub fn with_console(tx: std::sync::mpsc::Sender<u8>, rx: std::sync::mpsc::Receiver<u8>) -> Self {
+        Self {
+            console_tx: Some(tx),
+            console_rx: Some(rx),
+            ..Default::default()
+        }
+    }
+
+    /// Try to read a character from the console input (non-blocking).
+    fn try_read_console(&mut self) -> Option<u8> {
+        if let Some(rx) = &self.console_rx {
+            rx.try_recv().ok()
+        } else {
+            None
+        }
+    }
+
+    /// Try to write a character to the console output (non-blocking).
+    fn try_write_console(&mut self, ch: u8) -> bool {
+        if let Some(tx) = &self.console_tx {
+            tx.send(ch).is_ok()
+        } else {
+            false
+        }
+    }
+
+    pub fn read32(&mut self, offset: u32) -> u32 {
         // NS16550 registers are 8-bit but accessed at 32-bit aligned addresses on O2
         let reg_offset = offset & 0x1F; // Only lower 5 bits used
         match reg_offset {
             0x00 => { // RBR (read) / THR (write) / DLL (DLAB=1)
-                if self.dlab { self.dll as u32 } else { self.rbr as u32 }
+                if self.dlab {
+                    self.dll as u32
+                } else {
+                    // Try to read from console if no data in RBR
+                    if self.lsr & 0x01 == 0 { // DR (Data Ready) bit not set
+                        if let Some(ch) = self.try_read_console() {
+                            self.rbr = ch;
+                            self.lsr |= 0x01; // Set DR bit
+                        }
+                    }
+                    self.rbr as u32
+                }
             }
             0x04 => { // IER / DLM (DLAB=1)
                 if self.dlab { self.dlm as u32 } else { self.ier as u32 }
@@ -969,7 +1027,15 @@ impl UartState {
         let val = value as u8;
         match reg_offset {
             0x00 => { // THR (write) / DLL (DLAB=1)
-                if self.dlab { self.dll = val; } else { self.thr = val; }
+                if self.dlab {
+                    self.dll = val;
+                } else {
+                    self.thr = val;
+                    // Write to console output
+                    self.try_write_console(val);
+                    // Set THRE (Transmitter Holding Register Empty) bit
+                    self.lsr |= 0x20;
+                }
             }
             0x04 => { // IER / DLM (DLAB=1)
                 if self.dlab { self.dlm = val; } else { self.ier = val; }
