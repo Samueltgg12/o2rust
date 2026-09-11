@@ -1,114 +1,195 @@
 //! O2Rust command-line interface.
 //!
-//! Boots the IP32 PROM and runs the emulator headlessly (no GUI). Useful for
-//! testing the core library and for milestone M2 (CPU + memory execute the
-//! PROM).
+//! Windowed mode (default): prints the ASCII logo, opens an OpenGL framebuffer
+//! window (winit + glutin), streams keyboard/mouse events into the guest PS/2
+//! ports, outputs emulated audio via cpal, and mounts disk images — chosen via
+//! `rfd` file dialogs when not given on the command line.
+//!
+//! `--headless` runs the classic console front-end (stdin → UART1, UART2 →
+//! stdout) without a window or disks.
 
-use anyhow::Result;
-use clap::Parser;
-use o2rust::system::Emulator;
+mod args;
+mod audio;
+mod disk;
+mod display;
+mod input;
+mod logo;
+
 use std::io::{self, Read, Write};
 use std::sync::mpsc;
 use std::thread;
 
-/// O2Rust — an accurate & fast SGI O2 (IP32) emulator.
-#[derive(Parser, Debug)]
-#[command(name = "o2rust-cli", version, about)]
-struct Args {
-    /// Path to the IP32 PROM image (e.g. samples/ip32prom.rev4.18.bin).
-    #[arg(index = 1, default_value = "samples/ip32prom.rev4.18.bin")]
-    prom: String,
+use anyhow::{Context, Result};
+use clap::Parser;
+use o2rust::system::Emulator;
+use tracing::{error, info, warn};
 
-    /// Amount of RAM in megabytes.
-    #[arg(short, long, default_value_t = 256)]
-    ram_mb: u32,
-
-    /// Number of instructions to execute (0 = run until stopped).
-    #[arg(short, long, default_value_t = 0)]
-    steps: u64,
-
-    /// Enable verbose (debug) logging.
-    #[arg(short, long)]
-    verbose: bool,
-}
+use args::Args;
 
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    if args.verbose {
-        unsafe {
-            std::env::set_var("RUST_LOG", "o2rust=debug,o2rust_cli=debug");
-        }
+    // The tracing subscriber reads RUST_LOG (o2rust::log::init); honour the
+    // `-l`/`--log-filter` argument by seeding it before init.
+    unsafe {
+        std::env::set_var("RUST_LOG", args.effective_log_filter());
     }
     o2rust::log::init();
 
-    o2rust::log::info_msg(&format!("O2Rust v{} — CLI", o2rust::VERSION));
+    logo::print_banner();
+    info!(version = %o2rust::VERSION, "starting O2Rust CLI");
 
-    // Create console channels for UART1 (console) and UART2
+    match run(args) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            error!("{e:#}");
+            Err(e)
+        }
+    }
+}
+
+fn run(args: Args) -> Result<()> {
+    // Console channels for UART1 (console I/O) and UART2 (console output).
     let (uart1_tx, uart1_rx) = mpsc::channel::<u8>();
     let (uart2_tx, uart2_rx) = mpsc::channel::<u8>();
-
-    // Clone sender for the stdin thread
+    // Clone for the headless stdin thread (kept until the emulator owns it).
     let uart1_tx_stdin = uart1_tx.clone();
 
-    // Spawn thread to read from stdin and send to UART1 (console input)
+    let mut emulator = Emulator::with_ram(args.ram_mb, uart1_tx, uart1_rx, uart2_tx);
+    emulator
+        .load_prom(&args.prom)
+        .with_context(|| format!("failed to load PROM '{}'", args.prom))?;
+    info!(pc = format_args!("0x{:08x}", emulator.pc()), "PROM loaded, CPU reset");
+
+    mount_disks(&mut emulator, &args)?;
+
+    if args.headless {
+        run_headless(emulator, &args, uart2_rx, uart1_tx_stdin)
+    } else {
+        run_windowed(emulator, &args)
+    }
+}
+
+/// Mount the hard disk and CD-ROM, prompting with file dialogs when no paths
+/// were given and we're allowed to block on user input.
+fn mount_disks(emulator: &mut Emulator, args: &Args) -> Result<()> {
+    let interactive = !args.headless;
+
+    let hd = match &args.hard_disk {
+        Some(path) => disk::open_hard_disk(std::path::Path::new(path))
+            .with_context(|| format!("failed to open hard disk '{path}'"))?,
+        None if interactive => match disk::pick_image(
+            "Select the SCSI0 hard disk image",
+            &["raw", "img", "chd"],
+            "hard-disk.img",
+        )? {
+            Some(path) => disk::open_hard_disk(&path)
+                .with_context(|| format!("failed to open hard disk '{}'", path.display()))?,
+            None => {
+                info!("no hard disk mounted (dialog canceled)");
+                return Ok(());
+            }
+        },
+        None => {
+            info!("no hard disk (none given)");
+            return Ok(());
+        }
+    };
+    emulator.mount_hard_disk(hd).context("failed to mount hard disk")?;
+
+    let cd = match &args.cdrom {
+        Some(path) => disk::open_cdrom(std::path::Path::new(path))
+            .with_context(|| format!("failed to open CD-ROM '{path}'"))?,
+        None if interactive => {
+            match disk::pick_image("Select the SCSI6 CD-ROM image", &["iso", "img"], "install.iso")? {
+                Some(path) => disk::open_cdrom(&path)
+                    .with_context(|| format!("failed to open CD-ROM '{}'", path.display()))?,
+                None => {
+                    info!("no CD-ROM mounted (dialog canceled)");
+                    return Ok(());
+                }
+            }
+        }
+        None => {
+            info!("no CD-ROM (none given)");
+            return Ok(());
+        }
+    };
+    emulator.mount_cdrom(cd).context("failed to mount CD-ROM")?;
+
+    Ok(())
+}
+
+/// Headless mode: run the PROM with UART console I/O on stdin/stdout.
+fn run_headless(
+    mut emulator: Emulator,
+    args: &Args,
+    uart2_rx: mpsc::Receiver<u8>,
+    uart1_tx_stdin: mpsc::Sender<u8>,
+) -> Result<()> {
+    info!("headless mode — console on stdin/stdout (hang up to exit)");
+
+    // stdin → UART1 (console input)
     thread::spawn(move || {
         let mut stdin = io::stdin();
         let mut buf = [0u8; 1];
         loop {
             match stdin.read_exact(&mut buf) {
-                Ok(_) => {
-                    if uart1_tx_stdin.send(buf[0]).is_err() {
-                        break; // Channel closed, exit thread
-                    }
-                }
-                Err(_) => break, // EOF or error, exit thread
+                Ok(_) if uart1_tx_stdin.send(buf[0]).is_err() => break,
+                Ok(_) => {}
+                Err(_) => break,
             }
         }
     });
 
-    // Spawn thread to read from UART2 (console output) and write to stdout
-    // uart2_rx is moved into this thread (not needed by emulator)
+    // UART2 → stdout (console output)
     thread::spawn(move || {
         let mut stdout = io::stdout();
-        loop {
-            match uart2_rx.recv() {
-                Ok(byte) => {
-                    if stdout.write_all(&[byte]).is_err() {
-                        break;
-                    }
-                    if stdout.flush().is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break, // Channel closed, exit thread
+        while let Ok(byte) = uart2_rx.recv() {
+            if stdout.write_all(&[byte]).is_err() || stdout.flush().is_err() {
+                break;
             }
         }
     });
-
-    // Emulator only needs uart1_tx, uart1_rx, uart2_tx (not uart2_rx)
-    let mut emulator = Emulator::with_ram(args.ram_mb, uart1_tx, uart1_rx, uart2_tx);
-    emulator.load_prom(&args.prom)?;
-
-    o2rust::log::info_msg(&format!(
-        "Booting PROM at reset vector 0x{:08x}",
-        emulator.pc()
-    ));
 
     if args.steps > 0 {
         emulator.run(args.steps);
-        o2rust::log::info_msg(&format!(
-            "Executed {} instructions, PC = 0x{:08x}",
-            args.steps,
-            emulator.pc()
-        ));
+        info!(
+            pc = format_args!("0x{:08x}", emulator.pc()),
+            "executed {} instructions",
+            args.steps
+        );
     } else {
-        o2rust::log::info_msg("Running until stopped (Ctrl+C to quit)...");
-        // Run in a loop until interrupted.
+        info!("running until stopped (Ctrl+C to quit)");
         loop {
             emulator.run(1_000_000);
         }
     }
-
     Ok(())
+}
+
+/// Windowed mode: OpenGL framebuffer + input + audio.
+fn run_windowed(mut emulator: Emulator, args: &Args) -> Result<()> {
+    let audio = if args.no_audio {
+        None
+    } else {
+        match emulator.take_audio_consumer() {
+            Some(consumer) => match audio::start(consumer) {
+                Ok(audio) => {
+                    info!("audio output started");
+                    Some(audio)
+                }
+                Err(e) => {
+                    warn!("audio unavailable, continuing silently: {e:#}");
+                    None
+                }
+            },
+            None => {
+                warn!("no audio ring available from core, continuing silently");
+                None
+            }
+        }
+    };
+
+    display::run(emulator, audio)
 }

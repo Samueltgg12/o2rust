@@ -6,13 +6,15 @@
 pub mod bus;
 
 use crate::cpu::{CpuModel, R5000};
+use crate::io::scsi::{ScsiBus, SCSI_TARGET_CDROM, SCSI_TARGET_DISK};
 use crate::memory::MemoryMap;
 use crate::prom::Prom;
+use crate::storage::BlockDevice;
 use crate::{ip32, log};
 
 /// The top-level emulator.
 ///
-/// Owns the CPU, memory, and PROM, and provides a simple run loop.
+/// Owns the CPU, memory, PROM, and SCSI bus, and provides a simple run loop.
 pub struct Emulator {
     /// The MIPS CPU core.
     pub cpu: R5000,
@@ -22,6 +24,8 @@ pub struct Emulator {
     pub prom: Option<Prom>,
     /// The CPU model being emulated.
     pub model: CpuModel,
+    /// The SCSI bus (hard disk on target 1, CD-ROM on target 6).
+    pub scsi: ScsiBus,
     /// Whether the emulator is running.
     running: bool,
 }
@@ -42,6 +46,7 @@ impl Emulator {
             memory: MemoryMap::new(256, uart1_tx, uart1_rx, uart2_tx),
             prom: None,
             model: CpuModel::R5000,
+            scsi: ScsiBus::new(),
             running: false,
         }
     }
@@ -60,6 +65,7 @@ impl Emulator {
             memory: MemoryMap::new(ram_mb, uart1_tx, uart1_rx, uart2_tx),
             prom: None,
             model: CpuModel::R5000,
+            scsi: ScsiBus::new(),
             running: false,
         }
     }
@@ -154,5 +160,86 @@ impl Emulator {
     /// The current framebuffer height in pixels.
     pub fn framebuffer_height(&self) -> usize {
         self.memory.gbe.height() as usize
+    }
+
+    // === SCSI storage ===
+
+    /// Mount a device as the internal **hard disk** (SCSI target 1).
+    pub fn mount_hard_disk(&mut self, device: Box<dyn BlockDevice>) -> anyhow::Result<()> {
+        self.mount_scsi(SCSI_TARGET_DISK, device, "hard disk")
+    }
+
+    /// Mount a device as the internal **CD-ROM** (SCSI target 6).
+    pub fn mount_cdrom(&mut self, device: Box<dyn BlockDevice>) -> anyhow::Result<()> {
+        self.mount_scsi(SCSI_TARGET_CDROM, device, "CD-ROM")
+    }
+
+    fn mount_scsi(
+        &mut self,
+        target: u8,
+        device: Box<dyn BlockDevice>,
+        kind: &str,
+    ) -> anyhow::Result<()> {
+        let name = device.name().to_string();
+        let sector_count = device.sector_count();
+        let sector_size = device.sector_size();
+        self.scsi.mount(target, device).map_err(|e| {
+            anyhow::anyhow!("failed to mount {kind} image: {e}")
+        })?;
+        log::info_msg(&format!(
+            "Mounted {kind} '{name}' on SCSI target {target} ({} bytes in {sector_count} sectors of {sector_size} B)",
+            sector_count * u64::from(sector_size)
+        ));
+        self.scsi_unimplemented_trace();
+        Ok(())
+    }
+
+    fn scsi_unimplemented_trace(&self) {
+        log::debug_msg("SCSI register emulation (AIC-7880) is not yet wired; image mounted ready for future M3 work");
+    }
+
+    /// The name of the attached hard disk, if any.
+    pub fn hard_disk_name(&self) -> Option<String> {
+        self.scsi
+            .device_info(SCSI_TARGET_DISK)
+            .map(|info| info.name)
+    }
+
+    /// The name of the attached CD-ROM, if any.
+    pub fn cdrom_name(&self) -> Option<String> {
+        self.scsi
+            .device_info(SCSI_TARGET_CDROM)
+            .map(|info| info.name)
+    }
+
+    /// Take the host side of the MACE audio output ring for the front-end.
+    pub fn take_audio_consumer(&mut self) -> Option<rtrb::Consumer<f32>> {
+        self.memory.mace.take_audio_consumer()
+    }
+
+    // === Keyboard / mouse input ===
+
+    /// Queue a host keyboard scan-code byte (PS/2 scan set 2) for the guest.
+    pub fn push_kbd_byte(&mut self, byte: u8) {
+        self.memory.mace.perif.kbdms.push_kbd_byte(byte);
+    }
+
+    /// Queue a host mouse packet byte for the guest.
+    pub fn push_ms_byte(&mut self, byte: u8) {
+        self.memory.mace.perif.kbdms.push_ms_byte(byte);
+    }
+
+    /// Queue a complete 3-byte PS/2 mouse packet for the guest.
+    pub fn push_ms_packet(&mut self, packet: [u8; 3]) {
+        for b in packet {
+            self.memory.mace.perif.kbdms.push_ms_byte(b);
+        }
+    }
+
+    /// Flush queued keyboard/mouse input (used by front-ends on focus loss).
+    pub fn flush_input(&mut self) {
+        let kbdms = &mut self.memory.mace.perif.kbdms;
+        kbdms.keyboard_input.clear();
+        kbdms.mouse_input.clear();
     }
 }

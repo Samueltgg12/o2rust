@@ -24,6 +24,7 @@ pub mod io;
 pub mod log;
 pub mod memory;
 pub mod prom;
+pub mod storage;
 pub mod system;
 
 /// Common types and constants shared across the emulator.

@@ -23,3 +23,4 @@ cpal.workspace = true
 rtrb.workspace = true
 rfd.workspace = true
 libchdman-rs.workspace = true
+glow = "0.16"

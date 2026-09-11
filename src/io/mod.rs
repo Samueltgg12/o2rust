@@ -13,6 +13,12 @@
 //! Register maps sourced from Linux `arch/mips/sgi-ip32/`, NetBSD `sys/arch/sgimips/`,
 //! and leaked IRIX source `stand/arcs/`.
 
+pub mod scsi;
+
+pub use scsi::{SCSI_TARGET_CDROM, SCSI_TARGET_DISK, ScsiBus};
+
+use std::collections::VecDeque;
+
 /// MACE base address (IRIX `mace.h`).
 pub const MACE_BASE: u32 = 0x1f00_0000;
 
@@ -118,6 +124,10 @@ pub mod perif {
         pub const STATUS: u32 = 0x0004; // Status
         pub const DATA: u32 = 0x0008;   // Data port
         pub const INDIRECT: u32 = 0x000C; // Indirect register access
+
+        /// Frames in the output ring between the emulated AD1843 and the
+        /// front-end audio thread (~46 ms at 44.1 kHz). Power of two.
+        pub const RING_CAPACITY: usize = 4096;
     }
 
     // ISA Bridge (PC87312) - offset 0x10000
@@ -292,6 +302,9 @@ pub struct Mace {
     pub vin2: VinState,
     /// Video Out state
     pub vout: VinState,
+    /// Host side of the audio output ring (frames produced by the emulated
+    /// codec). The CLI/GUI front-end pulls it via [`Mace::take_audio_consumer`].
+    audio_out: Option<rtrb::Consumer<f32>>,
 }
 
 impl Mace {
@@ -303,14 +316,18 @@ impl Mace {
         uart1_rx: std::sync::mpsc::Receiver<u8>,
         uart2_tx: std::sync::mpsc::Sender<u8>,
     ) -> Self {
+        let mut perif = PerifState::default();
+        let (audio_out, audio_from_guest) = rtrb::RingBuffer::new(perif::audio::RING_CAPACITY);
+        perif.audio.out = Some(audio_out);
         Self {
             pci: PciState::default(),
             enet: EnetState::default(),
-            perif: PerifState::default(),
+            perif,
             isa_ext: IsaExtState::with_console(uart1_tx, uart1_rx, uart2_tx),
             vin1: VinState::default(),
             vin2: VinState::default(),
             vout: VinState::default(),
+            audio_out: Some(audio_from_guest),
         }
     }
 
@@ -319,6 +336,14 @@ impl Mace {
         let (uart1_tx, uart1_rx) = std::sync::mpsc::channel();
         let (uart2_tx, _uart2_rx) = std::sync::mpsc::channel();
         Self::with_console(uart1_tx, uart1_rx, uart2_tx)
+    }
+
+    /// Take the host side of the audio output ring.
+    ///
+    /// Exactly one consumer is produced; taking it moves ownership to the
+    /// front-end (CLI/GUI). Returns `None` if already taken.
+    pub fn take_audio_consumer(&mut self) -> Option<rtrb::Consumer<f32>> {
+        self.audio_out.take()
     }
 
     /// Reset the MACE ASIC.
@@ -358,7 +383,7 @@ impl Mace {
             // Ethernet
             offset if offset >= enet::BASE && offset <= enet::BASE + 0x1FF => self.enet.read32(offset - enet::BASE),
             // Peripheral
-            offset if offset >= perif::BASE && offset <= perif::BASE + 0x4FFFF => self.perif.read32(offset - perif::BASE),
+            offset if offset >= perif::BASE && offset <= perif::BASE + 0x4FFFF => self.perif.read32_immutable(offset - perif::BASE),
             // ISA External
             offset if offset >= isa_ext::BASE && offset <= isa_ext::BASE + 0x3FFFF => self.isa_ext.read32_immutable(offset - isa_ext::BASE),
             // Video In 1
@@ -618,7 +643,7 @@ pub struct PerifState {
 }
 
 impl PerifState {
-    pub fn read32(&self, offset: u32) -> u32 {
+    pub fn read32(&mut self, offset: u32) -> u32 {
         match offset {
             offset if offset >= perif::audio::BASE && offset <= perif::audio::BASE + 0xFF => self.audio.read32(offset - perif::audio::BASE),
             offset if offset >= perif::isa::BASE && offset <= perif::isa::BASE + 0xFF => self.isa.read32(offset - perif::isa::BASE),
@@ -627,6 +652,21 @@ impl PerifState {
             offset if offset >= perif::ustmsc::BASE && offset <= perif::ustmsc::BASE + 0xFF => self.ustmsc.read32(offset - perif::ustmsc::BASE),
             _ => {
                 log::warn!("PERIF read32: unimplemented offset 0x{:05X}", offset);
+                0
+            }
+        }
+    }
+
+    /// Read without mutating state (used by the read-only address guard).
+    pub fn read32_immutable(&self, offset: u32) -> u32 {
+        match offset {
+            offset if offset >= perif::audio::BASE && offset <= perif::audio::BASE + 0xFF => self.audio.read32(offset - perif::audio::BASE),
+            offset if offset >= perif::isa::BASE && offset <= perif::isa::BASE + 0xFF => self.isa.read32(offset - perif::isa::BASE),
+            offset if offset >= perif::kbdms::BASE && offset <= perif::kbdms::BASE + 0xFF => self.kbdms.read32_immutable(offset - perif::kbdms::BASE),
+            offset if offset >= perif::i2c::BASE && offset <= perif::i2c::BASE + 0xFF => self.i2c.read32(offset - perif::i2c::BASE),
+            offset if offset >= perif::ustmsc::BASE && offset <= perif::ustmsc::BASE + 0xFF => self.ustmsc.read32(offset - perif::ustmsc::BASE),
+            _ => {
+                log::warn!("PERIF read32_immutable: unimplemented offset 0x{:05X}", offset);
                 0
             }
         }
@@ -647,12 +687,30 @@ impl PerifState {
 }
 
 /// Audio (AD1843) state.
-#[derive(Debug, Default)]
+///
+/// The emulated codec writes digitized output samples into `out` (an rtrb
+/// ring); the front-end (CLI/GUI) consumes them through the corresponding
+/// [`rtrb::Consumer`] obtained from [`Mace::take_audio_consumer`].
+#[derive(Debug)]
 pub struct AudioState {
     pub ctrl: u32,
     pub status: u32,
     pub data: u32,
     pub indirect: u32,
+    /// Host-visible output sample ring (producer side fed by the codec).
+    pub out: Option<rtrb::Producer<f32>>,
+}
+
+impl Default for AudioState {
+    fn default() -> Self {
+        Self {
+            ctrl: 0,
+            status: 0,
+            data: 0,
+            indirect: 0,
+            out: None,
+        }
+    }
 }
 
 impl AudioState {
@@ -677,6 +735,29 @@ impl AudioState {
             perif::audio::INDIRECT => self.indirect = value,
             _ => {
                 log::warn!("AUDIO write32: unimplemented offset 0x{:04X} = 0x{:08X}", offset, value);
+            }
+        }
+    }
+
+    /// Feed digitized output samples (mono `f32`) into the front-end ring.
+    ///
+    /// No-op when no front-end has taken the ring (headless runs).
+    pub fn push_output_samples(&mut self, samples: &[f32]) {
+        if let Some(producer) = self.out.as_mut() {
+            let mut pushed = 0;
+            for s in samples {
+                if producer.push(*s).is_ok() {
+                    pushed += 1;
+                } else {
+                    break; // ring is full; drop the rest
+                }
+            }
+            if pushed < samples.len() {
+                log::debug!(
+                    "audio ring full, dropped {} of {} samples",
+                    samples.len() - pushed,
+                    samples.len()
+                );
             }
         }
     }
@@ -719,17 +800,112 @@ impl IsaState {
 }
 
 /// Keyboard/Mouse (PS/2) state.
-#[derive(Debug, Default)]
+///
+/// Host keyboard/mouse input arrives through [`KbdMsState::push_kbd_byte`] and
+/// [`KbdMsState::push_ms_byte`] (PS/2 scan set 2 for the keyboard, standard
+/// 3-byte relative packets for the mouse); the guest firmware / drivers read
+/// them back out of [`PerifState::read32`] one byte at a time.
+#[derive(Debug)]
 pub struct KbdMsState {
     pub kbd_data: u32,
     pub kbd_ctrl: u32,
     pub ms_data: u32,
     pub ms_ctrl: u32,
     pub status: u32,
+    /// PS/2 keyboard bytes queued from the host, LIFO-fed by the 8042.
+    pub keyboard_input: VecDeque<u8>,
+    /// PS/2 mouse bytes queued from the host.
+    pub mouse_input: VecDeque<u8>,
+}
+
+/// Maximum number of queued input bytes per device before the host-side FIFO
+/// starts dropping (guards the guest polling long stretches of dead code).
+const INPUT_FIFO_CAPACITY: usize = 256;
+
+impl Default for KbdMsState {
+    fn default() -> Self {
+        Self {
+            kbd_data: 0,
+            kbd_ctrl: 0,
+            ms_data: 0,
+            ms_ctrl: 0,
+            status: 0,
+            keyboard_input: VecDeque::new(),
+            mouse_input: VecDeque::new(),
+        }
+    }
 }
 
 impl KbdMsState {
-    pub fn read32(&self, offset: u32) -> u32 {
+    /// Queue a host keyboard scan-code byte for the guest.
+    pub fn push_kbd_byte(&mut self, byte: u8) {
+        if self.keyboard_input.len() < INPUT_FIFO_CAPACITY {
+            self.keyboard_input.push_back(byte);
+            self.status |= 1; // 8042 OBF
+        } else {
+            log::debug!("keyboard input FIFO full, dropping byte 0x{byte:02X}");
+        }
+    }
+
+    /// Queue a host mouse packet byte for the guest.
+    pub fn push_ms_byte(&mut self, byte: u8) {
+        if self.mouse_input.len() < INPUT_FIFO_CAPACITY {
+            self.mouse_input.push_back(byte);
+            self.status |= 4; // 8042 OBF (mouse)
+        } else {
+            log::debug!("mouse input FIFO full, dropping byte 0x{byte:02X}");
+        }
+    }
+
+    /// Whether guest-pending keyboard data is available.
+    pub fn has_kbd_data(&self) -> bool {
+        !self.keyboard_input.is_empty()
+    }
+
+    /// Whether guest-pending mouse data is available.
+    pub fn has_ms_data(&self) -> bool {
+        !self.mouse_input.is_empty()
+    }
+
+    pub fn read32(&mut self, offset: u32) -> u32 {
+        match offset {
+            perif::kbdms::KBD_DATA => {
+                if let Some(byte) = self.keyboard_input.pop_front() {
+                    self.kbd_data = u32::from(byte);
+                }
+                // Output-buffer-full tracks whether more bytes remain.
+                let obf_set = self.has_kbd_data();
+                if obf_set {
+                    self.status |= 1;
+                } else {
+                    self.status &= !1;
+                }
+                self.kbd_data
+            }
+            perif::kbdms::MS_DATA => {
+                if let Some(byte) = self.mouse_input.pop_front() {
+                    self.ms_data = u32::from(byte);
+                }
+                let obf_set = self.has_ms_data();
+                if obf_set {
+                    self.status |= 4;
+                } else {
+                    self.status &= !4;
+                }
+                self.ms_data
+            }
+            perif::kbdms::KBD_CTRL => self.kbd_ctrl,
+            perif::kbdms::MS_CTRL => self.ms_ctrl,
+            perif::kbdms::STATUS => self.status,
+            _ => {
+                log::warn!("KBD/MS read32: unimplemented offset 0x{:04X}", offset);
+                0
+            }
+        }
+    }
+
+    /// Read without consuming queued input bytes (used by the address guard).
+    pub fn read32_immutable(&self, offset: u32) -> u32 {
         match offset {
             perif::kbdms::KBD_DATA => self.kbd_data,
             perif::kbdms::KBD_CTRL => self.kbd_ctrl,
@@ -737,7 +913,7 @@ impl KbdMsState {
             perif::kbdms::MS_CTRL => self.ms_ctrl,
             perif::kbdms::STATUS => self.status,
             _ => {
-                log::warn!("KBD/MS read32: unimplemented offset 0x{:04X}", offset);
+                log::warn!("KBD/MS read32_immutable: unimplemented offset 0x{:04X}", offset);
                 0
             }
         }

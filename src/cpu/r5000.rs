@@ -1740,6 +1740,17 @@ mod tests {
         fn read8(&mut self, addr: u32) -> u8 {
             self.data[addr as usize]
         }
+        fn read64(&mut self, addr: u32) -> u64 {
+            let a = addr as usize;
+            ((self.data[a] as u64) << 56)
+                | ((self.data[a + 1] as u64) << 48)
+                | ((self.data[a + 2] as u64) << 40)
+                | ((self.data[a + 3] as u64) << 32)
+                | ((self.data[a + 4] as u64) << 24)
+                | ((self.data[a + 5] as u64) << 16)
+                | ((self.data[a + 6] as u64) << 8)
+                | (self.data[a + 7] as u64)
+        }
         fn write32(&mut self, addr: u32, value: u32) {
             let a = addr as usize;
             self.data[a] = (value >> 24) as u8;
@@ -1754,6 +1765,17 @@ mod tests {
         }
         fn write8(&mut self, addr: u32, value: u8) {
             self.data[addr as usize] = value;
+        }
+        fn write64(&mut self, addr: u32, value: u64) {
+            let a = addr as usize;
+            self.data[a] = (value >> 56) as u8;
+            self.data[a + 1] = (value >> 48) as u8;
+            self.data[a + 2] = (value >> 40) as u8;
+            self.data[a + 3] = (value >> 32) as u8;
+            self.data[a + 4] = (value >> 24) as u8;
+            self.data[a + 5] = (value >> 16) as u8;
+            self.data[a + 6] = (value >> 8) as u8;
+            self.data[a + 7] = value as u8;
         }
     }
 
