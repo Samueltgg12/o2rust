@@ -109,18 +109,30 @@ impl Emulator {
     pub fn step(&mut self) {
         let mut bus = bus::SystemBus { memory: &mut self.memory };
         self.cpu.step(&mut bus);
+        self.check_crime_reset();
     }
 
     /// Run for `n` cycles.
     pub fn run(&mut self, n: u64) {
         let mut bus = bus::SystemBus { memory: &mut self.memory };
         self.cpu.run(&mut bus, n);
+        self.check_crime_reset();
     }
 
     /// Run until the program counter reaches `target_pc`.
     pub fn run_until(&mut self, target_pc: u32) {
         let mut bus = bus::SystemBus { memory: &mut self.memory };
         self.cpu.run_until(&mut bus, target_pc);
+        self.check_crime_reset();
+    }
+
+    /// If CRIME requested a hard/soft reset, reset the CPU to the reset vector.
+    fn check_crime_reset(&mut self) {
+        if self.memory.crime_cpu.reset_requested() {
+            self.memory.crime_cpu.clear_reset_request();
+            self.cpu.reset(ip32::PROM_RESET_VECTOR);
+            log::info_msg("CRIME reset: CPU reset to reset vector");
+        }
     }
 
     /// Whether the emulator is currently running.

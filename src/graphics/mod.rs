@@ -146,6 +146,9 @@ pub struct CrimeCpuInterface {
     mem_error_ecc_syn: u32,
     mem_error_ecc_chk: u32,
     mem_error_ecc_repl: u32,
+    /// Set when a hard/soft reset is written to the control register. The
+    /// system loop checks this and resets the CPU to the reset vector.
+    reset_requested: bool,
 }
 
 impl Default for CrimeCpuInterface {
@@ -172,6 +175,7 @@ impl Default for CrimeCpuInterface {
             mem_error_ecc_syn: 0,
             mem_error_ecc_chk: 0,
             mem_error_ecc_repl: 0,
+            reset_requested: false,
         }
     }
 }
@@ -192,6 +196,16 @@ impl CrimeCpuInterface {
     /// Reset the CRIME CPU Interface.
     pub fn reset(&mut self) {
         *self = Self::new();
+    }
+
+    /// Whether a hard/soft reset has been requested via the control register.
+    pub fn reset_requested(&self) -> bool {
+        self.reset_requested
+    }
+
+    /// Clear the reset request flag (called after the system resets the CPU).
+    pub fn clear_reset_request(&mut self) {
+        self.reset_requested = false;
     }
 
     /// Get the interrupt status for the CPU.
@@ -269,6 +283,12 @@ impl AddressSpace for CrimeCpuInterface {
         match addr {
             crime_cpu::CRM_CONTROL => {
                 self.control = value & 0x3fff; // Mask per spec
+                // A hard or soft reset written to the control register resets
+                // the entire system (including the CPU). Signal the system
+                // loop to reset the CPU back to the reset vector.
+                if value & (crime_control::HARD_RESET | crime_control::SOFT_RESET) != 0 {
+                    self.reset_requested = true;
+                }
             }
             crime_cpu::CRM_INTMASK => {
                 self.intmask = value;
