@@ -31,6 +31,18 @@ pub trait MemoryAccess {
     fn write8(&mut self, addr: u32, value: u8);
     /// Write a 64-bit doubleword (big-endian).
     fn write64(&mut self, addr: u32, value: u64);
+
+    /// Fetch an instruction word (big-endian). Instruction fetches bypass
+    /// the data cache (an instruction stream is never cached as data).
+    fn fetch32(&mut self, addr: u32) -> u32 {
+        self.read32(addr)
+    }
+
+    /// Execute a `CACHE` instruction operation.
+    ///
+    /// `op_field` is the 5-bit `op` field (instruction bits 20:16);
+    /// `addr` is the computed (virtual) target address.
+    fn cache_instruction(&mut self, _op_field: u32, _addr: u32) {}
 }
 
 /// The MIPS R5000 CPU core.
@@ -68,11 +80,39 @@ impl R5000 {
     pub fn reset(&mut self, reset_vector: u32) {
         self.state.reset();
         self.state.pc = reset_vector;
+        self.state.pending_branch = None;
+        self.state.pipeline_restart = false;
+        self.state.nullify_delay_slot = false;
         self.state.next_pc = reset_vector.wrapping_add(4);
         self.cp0.reset();
         self.cycles = 0;
         self.stop_requested = false;
         log::info_msg(&format!("R5000 reset, PC = 0x{reset_vector:08x}"));
+    }
+
+    /// Warm reset via CRIME's SOFT_RESET bit.
+    ///
+    /// The R5000's soft-reset input walks the machine back to the reset
+    /// vector while latching the NMI (Status bit 19) and soft-reset (Status
+    /// bit 20) flags. The PROM's `start_me_up` tests those bits — it checks
+    /// `(Status >> 16) & 0x0018 == 0x0018` — and takes its warm-start path
+    /// (skipping diagnostics) when both are set. (MIPS III Status bits;
+    /// decompiled PROM `sloader.S` + `definitions.h` `ST0_NMI`/`ST0_SR`.)
+    pub fn soft_reset(&mut self, reset_vector: u32) {
+        self.state.reset();
+        self.state.pc = reset_vector;
+        self.state.pending_branch = None;
+        self.state.pipeline_restart = false;
+        self.state.nullify_delay_slot = false;
+        self.state.next_pc = reset_vector.wrapping_add(4);
+        self.cp0.reset();
+        self.cp0.write(
+            Cp0Reg::Status,
+            self.cp0.status() | 0x0008_0000 | 0x0010_0000,
+        );
+        self.cycles = 0;
+        self.stop_requested = false;
+        log::info_msg(&format!("R5000 soft reset (warm boot), PC = 0x{reset_vector:08x}"));
     }
 
     /// The number of cycles executed so far.
@@ -92,24 +132,50 @@ impl R5000 {
         }
 
         let pc = self.state.pc;
-        let instr = mem.read32(pc);
+
+        // If the previous instruction was a branch/jump, `pending` holds the
+        // address to resume at after its delay slot — which is this
+        // instruction.
+        let post_delay = self.state.pending_branch.take();
+        self.state.in_delay_slot = post_delay.is_some();
 
         // Default: advance to the next instruction. Branch/jump handlers
-        // override `next_pc`.
+        // begin a delay slot (`pending_branch = Some(...)`) instead;
+        // exceptions/ERET override `next_pc` and set `pipeline_restart`.
         self.state.next_pc = pc.wrapping_add(4);
-        self.state.in_delay_slot = false;
+        self.state.pipeline_restart = false;
 
-        // Handle branch likely nullification: if the previous branch likely
-        // was not taken, the delay slot instruction is nullified (treated as NOP).
+        // Skip straight through self-looping delay loops (the PROM's
+        // `wait_for_reset` 2^51-iteration spin, `isa_reset_delay_loop`, etc.)
+        // instead of executing 2^51 useless steps.
         if self.state.nullify_delay_slot {
+            // Branch likely not taken: the delay slot is nullified (NOP) but
+            // still consumes the slot.
             self.state.nullify_delay_slot = false;
-            // Skip execution - treat as NOP
+        } else if post_delay.is_none() && self.try_fast_forward(pc, mem) {
+            self.state.pc = self.state.next_pc;
+            self.state.in_delay_slot = false;
+            self.state.pending_branch = None;
+            self.state.gpr[0] = 0;
+            self.cp0.tick();
+            self.cycles += 1;
+            return;
         } else {
+            let instr = mem.fetch32(pc);
             self.execute(instr, mem);
         }
 
-        // Commit the PC.
-        self.state.pc = self.state.next_pc;
+        // Commit the PC. A branch inside a delay slot is discarded (undefined
+        // behaviour in MIPS), so always resume at the outer pending target.
+        let commit = if self.state.pipeline_restart {
+            self.state.next_pc // exception/ERET: restart, no delay slot
+        } else if let Some(t) = post_delay {
+            self.state.pending_branch = None; // discard a delay-slot branch
+            t
+        } else {
+            self.state.next_pc
+        };
+        self.state.pc = commit;
 
         // CP0 Count increments once per cycle.
         self.cp0.tick();
@@ -118,6 +184,191 @@ impl R5000 {
         self.state.gpr[0] = 0;
 
         self.cycles += 1;
+    }
+
+    /// Detect and fast-forward a self-looping delay loop.
+    ///
+    /// Firmware busy-waits by branching back onto itself while a counter
+    /// register is moved toward a bound. Two layouts are handled:
+    ///
+    /// 1. Branch first, counter move in its delay slot — the PROM
+    ///    `wait_for_reset` loop (`bgtz $a2, . / addi $a2, $a2, -1`).
+    /// 2. Counter move first, then the branch (delay slot is a NOP) — e.g.
+    ///    `isa_reset_delay_loop` (`addi $t9, $t9, -1 / bnez $t9, .`).
+    ///
+    /// On success the counter register, PC, cycle count and CP0 Count/Random
+    /// are advanced to just past the loop's final (not-taken) branch, and
+    /// [`CpuState::next_pc`] points at the fall-through instruction.
+    fn try_fast_forward(&mut self, pc: u32, mem: &mut dyn MemoryAccess) -> bool {
+        // Fast-encode the two instruction roles we look for.
+        #[derive(Clone, Copy, PartialEq, Debug)]
+        enum Kind {
+            Bgtz,
+            Blez,
+            Bgez,
+            Bltz,
+            Bne,
+        }
+
+        // A conditional branch with offset -1 (self-loop). Only the
+        // register-testing forms that can terminate a counter loop count.
+        fn branch_self(instr: u32) -> Option<(Kind, usize)> {
+            let op = (instr >> 26) & 0x3f;
+            let rs = ((instr >> 21) & 0x1f) as usize;
+            let rt = (instr >> 16) & 0x1f;
+            if (instr & 0xffff) as i16 != -1 {
+                return None;
+            }
+            match op {
+                0x07 => Some((Kind::Bgtz, rs)),
+                0x06 => Some((Kind::Blez, rs)),
+                0x05 if rt == 0 => Some((Kind::Bne, rs)),
+                0x01 => match rt {
+                    0 => Some((Kind::Bltz, rs)),
+                    1 => Some((Kind::Bgez, rs)),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+
+        // An in-place add that moves a register: ADDI/ADDIU/DADDI/DADDIU with
+        // rt == rs. Returns `(register, signed step)`.
+        fn decrement(instr: u32) -> Option<(usize, i64)> {
+            let op = (instr >> 26) & 0x3f;
+            if !(op == 0x08 || op == 0x09 || op == 0x18 || op == 0x19) {
+                return None;
+            }
+            let rs = ((instr >> 21) & 0x1f) as usize;
+            let rt = ((instr >> 16) & 0x1f) as usize;
+            if rt != rs {
+                return None;
+            }
+            let imm = (instr & 0xffff) as i16 as i64;
+            if imm == 0 {
+                return None;
+            }
+            Some((rs, imm))
+        }
+
+        let (kind, reg, m, branch_first) = match (
+            branch_self(mem.fetch32(pc)),
+            decrement(mem.fetch32(pc.wrapping_add(4))),
+        ) {
+            (Some((kind, brs)), Some((drs, m))) if brs == drs => (kind, drs, m, true),
+            _ => match (
+                decrement(mem.fetch32(pc)),
+                branch_self(mem.fetch32(pc.wrapping_add(4))),
+            ) {
+                (Some((drs, m)), Some((kind, brs))) if brs == drs => {
+                    // The branch's delay slot must be a no-op so skipping the
+                    // loop is side-effect free.
+                    if mem.fetch32(pc.wrapping_add(8)) != 0 {
+                        return false;
+                    }
+                    (kind, drs, m, false)
+                }
+                _ => return false,
+            },
+        };
+
+        let r0 = self.state.gpr(reg) as i128;
+        let m = m as i128;
+
+        // Smallest k >= 0 with the branch predicate false at R_k = r0 + k*m,
+        // or None when the loop never terminates.
+        let exit_index = match kind {
+            Kind::Bgtz => {
+                if r0 <= 0 {
+                    Some(0)
+                } else if m >= 0 {
+                    None
+                } else {
+                    Some((r0 + (-m) - 1) / (-m))
+                }
+            }
+            Kind::Blez => {
+                if r0 > 0 {
+                    Some(0)
+                } else if m <= 0 {
+                    None
+                } else {
+                    Some((-r0) / m + 1)
+                }
+            }
+            Kind::Bgez => {
+                if r0 < 0 {
+                    Some(0)
+                } else if m >= 0 {
+                    None
+                } else {
+                    Some(r0 / (-m) + 1)
+                }
+            }
+            Kind::Bltz => {
+                if r0 >= 0 {
+                    Some(0)
+                } else if m < 0 {
+                    None
+                } else {
+                    Some((-r0 + m - 1) / m)
+                }
+            }
+            Kind::Bne => {
+                if r0 == 0 {
+                    Some(0)
+                } else if m == 0 || (r0 > 0) == (m > 0) {
+                    None
+                } else {
+                    let a = r0.abs();
+                    let mb = m.abs();
+                    if a % mb != 0 {
+                        None
+                    } else {
+                        Some(a / mb)
+                    }
+                }
+            }
+        };
+
+        let idx = match exit_index {
+            Some(idx) => idx,
+            None => return false, // would run forever; leave it running
+        };
+
+        // Branch-first: the counter is read *before* each move and one extra
+        // move runs in the not-taken branch's delay slot, so the loop runs
+        // idx+1 evaluations and ends with R = r0 + (idx+1)*m. Each evaluation
+        // is two steps (branch + its delay-slot move).
+        // Move-first: evaluation k reads r0 + k*m and the loop stops when that
+        // goes false, so it runs `idx` evaluations and ends with R = r0+idx*m.
+        // Each evaluation is three steps (move + branch + delay-slot no-op).
+        let (_, final_r, skip) = if branch_first {
+            if idx == 0 {
+                return false; // first evaluation already not taken
+            }
+            (idx + 1, r0 + (idx + 1) * m, 2 * (idx + 1) - 1)
+        } else {
+            if idx <= 1 {
+                return false; // nothing meaningful to skip
+            }
+            (idx, r0 + idx * m, 3 * idx - 2)
+        };
+        let skip = skip as u64;
+
+        self.state.set_gpr(reg, final_r as u64);
+        self.state.next_pc = pc.wrapping_add(8);
+        self.state.pc = pc.wrapping_add(8);
+        self.state.pending_branch = None;
+        self.state.in_delay_slot = false;
+        self.state.nullify_delay_slot = false;
+
+        // `step()` will add its own cycle/tick for the current instruction.
+        // Cycle counts wrap on long runs (the guest can spin for months of
+        // emulated time), so use wrapping arithmetic.
+        self.cycles = self.cycles.wrapping_add(skip);
+        self.cp0.tick_n(skip);
+        true
     }
 
     /// Run for `n` cycles (or until `stop()` is called).
@@ -149,8 +400,10 @@ impl R5000 {
             0x05 => self.branch(instr, false, false),
             0x06 => self.branch_zero(instr, true, false),
             0x07 => self.branch_zero(instr, false, false),
-            0x14 => self.branch_zero(instr, true, true),   // BEQZL - Branch on Equal Zero Likely
-            0x15 => self.branch_zero(instr, false, true),  // BNEZL - Branch on Not Equal Zero Likely
+            0x14 => self.branch(instr, true, true),   // BEQL - Branch on Equal Likely
+            0x15 => self.branch(instr, false, true),  // BNEL - Branch on Not Equal Likely
+            0x16 => self.branch_zero(instr, true, true),   // BLEZL - Branch on Less/Eq Zero Likely
+            0x17 => self.branch_zero(instr, false, true),  // BGTZL - Branch on Greater Zero Likely
             0x08 => self.addi(instr, true),
             0x09 => self.addi(instr, false),
             0x0a => self.slti(instr, true),
@@ -220,7 +473,13 @@ impl R5000 {
     ///   7 = Hit_Writeback (alternate)
     ///
     /// The address is computed as: base_register + sign_extended_offset
-    fn execute_cache(&mut self, instr: u32, _mem: &mut dyn MemoryAccess) {
+    ///
+    /// The R5000 primary data cache is write-back and the PROM depends on it:
+    /// `DupSLStack`'s `Copy2MEM` reads the cached (kseg0) view of the stack to
+    /// restore it into RAM after the uncached (kseg1) memory test overwrites it
+    /// (see `src/memory/cache.rs`). The op is forwarded to the memory system,
+    /// which implements the data/instruction cache model.
+    fn execute_cache(&mut self, instr: u32, mem: &mut dyn MemoryAccess) {
         let rs = ((instr >> 21) & 0x1f) as usize;
         let offset = (instr & 0xffff) as i16 as i32 as u32;
         let base = self.state.gpr(rs) as u32;
@@ -236,57 +495,7 @@ impl R5000 {
             op, target_cache, operation, addr, rs, offset
         ));
 
-        // For now, implement as no-op with logging. Full cache simulation
-        // requires a cache model which is not yet implemented.
-        // The PROM uses CACHE instructions for cache initialization and
-        // management during boot.
-        match (target_cache, operation) {
-            // Index operations - use address to index into cache
-            (0, 0) => { /* Index_Invalidate_I */ }
-            (1, 0) => { /* Index_Writeback_Invalidate_D */ }
-            (2, 0) => { /* Index_Writeback_Invalidate_S / Flash */ }
-            (3, 0) => { /* Index_Writeback_Invalidate_D (alt) */ }
-
-            // Index_Load_Tag - load cache tag into CP0 TagLo/TagHi
-            (0, 1) => { /* Index_Load_Tag_I */ }
-            (1, 1) => { /* Index_Load_Tag_D */ }
-            (2, 1) => { /* Index_Load_Tag_S */ }
-            (3, 1) => { /* Index_Load_Tag_D (alt) */ }
-
-            // Index_Store_Tag - store CP0 TagLo/TagHi into cache tag
-            (0, 2) => { /* Index_Store_Tag_I */ }
-            (1, 2) => { /* Index_Store_Tag_D */ }
-            (2, 2) => { /* Index_Store_Tag_S */ }
-            (3, 2) => { /* Index_Store_Tag_D (alt) */ }
-
-            // Create_Dirty_Exclusive
-            (1, 3) => { /* Create_Dirty_Exclusive_D */ }
-            (3, 3) => { /* Create_Dirty_Exclusive_D (alt) */ }
-
-            // Hit operations - use address to check for cache hit
-            (0, 4) => { /* Hit_Invalidate_I */ }
-            (1, 4) => { /* Hit_Invalidate_D */ }
-            (2, 4) => { /* Hit_Invalidate_S */ }
-            (3, 4) => { /* Hit_Invalidate_D (alt) */ }
-
-            (1, 5) => { /* Hit_Writeback_Invalidate_D / Fill */ }
-            (2, 5) => { /* Hit_Writeback_Invalidate_S / Page_Invalidate */ }
-            (3, 5) => { /* Hit_Writeback_Invalidate_D (alt) */ }
-
-            (1, 6) => { /* Hit_Writeback_D */ }
-            (2, 6) => { /* Hit_Writeback_S */ }
-            (3, 6) => { /* Hit_Writeback_D (alt) */ }
-
-            (1, 7) => { /* Hit_Writeback_D (alt) */ }
-            (3, 7) => { /* Hit_Writeback_D (alt) */ }
-
-            _ => {
-                log::warn_msg(&format!(
-                    "Unknown CACHE operation: target_cache={}, operation={} at PC 0x{:08x}",
-                    target_cache, operation, self.state.pc
-                ));
-            }
-        }
+        mem.cache_instruction(op, addr);
     }
 
     // === SPECIAL (opcode 0x00) ===
@@ -300,8 +509,8 @@ impl R5000 {
         match funct {
             0x00 => {
                 // SLL
-                let v = self.state.gpr(rt) << shamt;
-                self.state.set_gpr(rd, v);
+                let v = (self.state.gpr(rt) as u32).wrapping_shl(shamt);
+                self.state.set_gpr(rd, (v as i32 as i64) as u64);
             }
             0x01 => {
                 // MOVCI (MIPS IV) - Move Conditional Integer
@@ -310,43 +519,43 @@ impl R5000 {
                     self.state.set_gpr(rd, self.state.gpr(rs));
                 }
             }
-            0x02 => {
+0x02 => {
                 // SRL
-                let v = self.state.gpr(rt) >> shamt;
-                self.state.set_gpr(rd, v);
+                let v = (self.state.gpr(rt) as u32) >> shamt;
+                self.state.set_gpr(rd, (v as i32 as i64) as u64);
             }
-            0x03 => {
+             0x03 => {
                 // SRA
-                let v = ((self.state.gpr(rt) as i64) >> shamt) as u64;
-                self.state.set_gpr(rd, v);
+                let v = ((self.state.gpr(rt) as u32 as i32) >> shamt) as u32;
+                self.state.set_gpr(rd, (v as i32 as i64) as u64);
             }
-            0x04 => {
+             0x04 => {
                 // SLLV
                 let s = (self.state.gpr(rs) & 0x1f) as u32;
-                let v = self.state.gpr(rt) << s;
-                self.state.set_gpr(rd, v);
+                let v = (self.state.gpr(rt) as u32).wrapping_shl(s);
+                self.state.set_gpr(rd, (v as i32 as i64) as u64);
             }
-            0x06 => {
+             0x06 => {
                 // SRLV
                 let s = (self.state.gpr(rs) & 0x1f) as u32;
-                let v = self.state.gpr(rt) >> s;
-                self.state.set_gpr(rd, v);
+                let v = (self.state.gpr(rt) as u32) >> s;
+                self.state.set_gpr(rd, (v as i32 as i64) as u64);
             }
-            0x07 => {
+             0x07 => {
                 // SRAV
                 let s = (self.state.gpr(rs) & 0x1f) as u32;
-                let v = ((self.state.gpr(rt) as i64) >> s) as u64;
-                self.state.set_gpr(rd, v);
+                let v = ((self.state.gpr(rt) as u32 as i32) >> s) as u32;
+                self.state.set_gpr(rd, (v as i32 as i64) as u64);
             }
             0x08 => {
                 // JR
-                self.state.next_pc = self.state.gpr(rs) as u32;
+                self.state.pending_branch = Some(self.state.gpr(rs) as u32);
             }
             0x09 => {
                 // JALR
                 let target = self.state.gpr(rs) as u32;
-                self.state.set_gpr(rd, self.state.pc.wrapping_add(8) as u64);
-                self.state.next_pc = target;
+                self.state.set_gpr(rd, (self.state.pc.wrapping_add(8) as i32 as i64) as u64);
+                self.state.pending_branch = Some(target);
             }
             0x0c => self.exception(ExceptionCode::Syscall),
             0x0d => self.exception(ExceptionCode::Breakpoint),
@@ -433,45 +642,45 @@ impl R5000 {
                     self.state.hi = a % b;
                 }
             }
-            0x20 => {
+0x20 => {
                 // ADD
                 let v = self.state.gpr(rs).wrapping_add(self.state.gpr(rt));
-                self.state.set_gpr(rd, v);
+                self.state.set_gpr(rd, (v as u32 as i32 as i64) as u64);
             }
-            0x21 => {
+             0x21 => {
                 // ADDU
                 let v = self.state.gpr(rs).wrapping_add(self.state.gpr(rt));
-                self.state.set_gpr(rd, v);
+                self.state.set_gpr(rd, (v as u32 as i32 as i64) as u64);
             }
-            0x22 => {
+             0x22 => {
                 // SUB
                 let v = self.state.gpr(rs).wrapping_sub(self.state.gpr(rt));
-                self.state.set_gpr(rd, v);
+                self.state.set_gpr(rd, (v as u32 as i32 as i64) as u64);
             }
-            0x23 => {
+             0x23 => {
                 // SUBU
                 let v = self.state.gpr(rs).wrapping_sub(self.state.gpr(rt));
-                self.state.set_gpr(rd, v);
+                self.state.set_gpr(rd, (v as u32 as i32 as i64) as u64);
             }
-            0x24 => {
+0x24 => {
                 // AND
-                let v = self.state.gpr(rs) & self.state.gpr(rt);
-                self.state.set_gpr(rd, v);
+                let v = (self.state.gpr(rs) as u32) & (self.state.gpr(rt) as u32);
+                self.state.set_gpr(rd, (v as i32 as i64) as u64);
             }
-            0x25 => {
+             0x25 => {
                 // OR
-                let v = self.state.gpr(rs) | self.state.gpr(rt);
-                self.state.set_gpr(rd, v);
+                let v = (self.state.gpr(rs) as u32) | (self.state.gpr(rt) as u32);
+                self.state.set_gpr(rd, (v as i32 as i64) as u64);
             }
-            0x26 => {
+             0x26 => {
                 // XOR
-                let v = self.state.gpr(rs) ^ self.state.gpr(rt);
-                self.state.set_gpr(rd, v);
+                let v = (self.state.gpr(rs) as u32) ^ (self.state.gpr(rt) as u32);
+                self.state.set_gpr(rd, (v as i32 as i64) as u64);
             }
-            0x27 => {
+             0x27 => {
                 // NOR
-                let v = !(self.state.gpr(rs) | self.state.gpr(rt));
-                self.state.set_gpr(rd, v);
+                let v = !((self.state.gpr(rs) as u32) | (self.state.gpr(rt) as u32));
+                self.state.set_gpr(rd, (v as i32 as i64) as u64);
             }
             0x2a => {
                 // SLT
@@ -654,65 +863,87 @@ impl R5000 {
             0x00 => {
                 // BLTZ - Branch on Less Than Zero
                 if (self.state.gpr(rs) as i64) < 0 {
-                    self.branch_offset(imm);
+                    self.branch_taken(imm);
+                } else {
+                    self.branch_not_taken(false);
                 }
             }
             0x01 => {
                 // BGEZ - Branch on Greater Than or Equal Zero
                 if (self.state.gpr(rs) as i64) >= 0 {
-                    self.branch_offset(imm);
+                    self.branch_taken(imm);
+                } else {
+                    self.branch_not_taken(false);
                 }
             }
             0x02 => {
                 // BLTZL - Branch on Less Than Zero Likely
                 if (self.state.gpr(rs) as i64) < 0 {
-                    self.branch_offset(imm);
+                    self.branch_taken(imm);
                 } else {
-                    // Skip delay slot
-                    self.state.pc = self.state.pc.wrapping_add(4);
+                    self.branch_not_taken(true);
                 }
             }
             0x03 => {
                 // BGEZL - Branch on Greater Than or Equal Zero Likely
                 if (self.state.gpr(rs) as i64) >= 0 {
-                    self.branch_offset(imm);
+                    self.branch_taken(imm);
                 } else {
-                    // Skip delay slot
-                    self.state.pc = self.state.pc.wrapping_add(4);
+                    self.branch_not_taken(true);
                 }
             }
-            0x10 => {
+0x10 => {
                 // BLTZAL - Branch on Less Than Zero And Link
-                self.state.set_gpr(31, self.state.pc.wrapping_add(8) as u64);
+                self.state.set_gpr(31, (self.state.pc.wrapping_add(8) as i32 as i64) as u64);
                 if (self.state.gpr(rs) as i64) < 0 {
-                    self.branch_offset(imm);
+                    self.branch_taken(imm);
+                } else {
+                    self.branch_not_taken(false);
                 }
             }
-            0x11 => {
+             0x11 => {
                 // BGEZAL - Branch on Greater Than or Equal Zero And Link
-                self.state.set_gpr(31, self.state.pc.wrapping_add(8) as u64);
+                self.state.set_gpr(31, (self.state.pc.wrapping_add(8) as i32 as i64) as u64);
                 if (self.state.gpr(rs) as i64) >= 0 {
-                    self.branch_offset(imm);
+                    self.branch_taken(imm);
+                } else {
+                    self.branch_not_taken(false);
+                }
+            }
+             0x12 => {
+                // BLTZALL - Branch on Less Than Zero And Link Likely
+                self.state.set_gpr(31, (self.state.pc.wrapping_add(8) as i32 as i64) as u64);
+                if (self.state.gpr(rs) as i64) < 0 {
+                    self.branch_taken(imm);
+                } else {
+                    self.branch_not_taken(true);
+                }
+            }
+             0x13 => {
+                // BGEZALL - Branch on Greater Than or Equal Zero And Link Likely
+                self.state.set_gpr(31, (self.state.pc.wrapping_add(8) as i32 as i64) as u64);
+                if (self.state.gpr(rs) as i64) >= 0 {
+                    self.branch_taken(imm);
+                } else {
+                    self.branch_not_taken(true);
                 }
             }
             0x12 => {
                 // BLTZALL - Branch on Less Than Zero And Link Likely
                 self.state.set_gpr(31, self.state.pc.wrapping_add(8) as u64);
                 if (self.state.gpr(rs) as i64) < 0 {
-                    self.branch_offset(imm);
+                    self.branch_taken(imm);
                 } else {
-                    // Skip delay slot
-                    self.state.pc = self.state.pc.wrapping_add(4);
+                    self.branch_not_taken(true);
                 }
             }
             0x13 => {
                 // BGEZALL - Branch on Greater Than or Equal Zero And Link Likely
                 self.state.set_gpr(31, self.state.pc.wrapping_add(8) as u64);
                 if (self.state.gpr(rs) as i64) >= 0 {
-                    self.branch_offset(imm);
+                    self.branch_taken(imm);
                 } else {
-                    // Skip delay slot
-                    self.state.pc = self.state.pc.wrapping_add(4);
+                    self.branch_not_taken(true);
                 }
             }
             0x08 => {
@@ -765,18 +996,21 @@ impl R5000 {
     fn jump(&mut self, instr: u32, link: bool) {
         let target = instr & 0x03ff_ffff;
         if link {
-            self.state.set_gpr(31, self.state.pc.wrapping_add(8) as u64);
+            self.state.set_gpr(31, (self.state.pc.wrapping_add(8) as i32 as i64) as u64);
         }
-        self.state.next_pc = (self.state.pc & 0xf000_0000) | (target << 2);
+        self.state.pending_branch = Some((self.state.pc & 0xf000_0000) | (target << 2));
     }
 
-    fn branch(&mut self, instr: u32, eq: bool, _likely: bool) {
+    fn branch(&mut self, instr: u32, eq: bool, likely: bool) {
         let rs = ((instr >> 21) & 0x1f) as usize;
         let rt = ((instr >> 16) & 0x1f) as usize;
         let imm = (instr & 0xffff) as i16 as i32;
         let equal = self.state.gpr(rs) == self.state.gpr(rt);
         if equal == eq {
-            self.branch_offset(imm);
+            self.branch_taken(imm);
+        } else {
+            // Not taken: the delay slot still runs, then fall through.
+            self.branch_not_taken(likely);
         }
     }
 
@@ -786,15 +1020,26 @@ impl R5000 {
         let val = self.state.gpr(rs) as i64;
         let take = if lez { val <= 0 } else { val > 0 };
         if take {
-            self.branch_offset(imm);
-        } else if likely {
-            // Branch likely not taken: nullify the delay slot instruction
-            self.state.nullify_delay_slot = true;
+            self.branch_taken(imm);
+        } else {
+            self.branch_not_taken(likely);
         }
     }
 
-    fn branch_offset(&mut self, imm: i32) {
-        self.state.next_pc = self.state.pc.wrapping_add(4).wrapping_add((imm << 2) as u32);
+    /// A conditional branch that is taken: its delay slot runs, then the PC
+    /// continues at the branch target.
+    fn branch_taken(&mut self, imm: i32) {
+        self.state.pending_branch =
+            Some(self.state.pc.wrapping_add(4).wrapping_add((imm << 2) as u32));
+    }
+
+    /// A conditional branch that is not taken: its delay slot runs, then the
+    /// PC falls through to `pc + 8`. Branch-likely nullifies the delay slot.
+    fn branch_not_taken(&mut self, likely: bool) {
+        self.state.pending_branch = Some(self.state.pc.wrapping_add(8));
+        if likely {
+            self.state.nullify_delay_slot = true;
+        }
     }
 
     // === Immediate arithmetic ===
@@ -803,7 +1048,7 @@ impl R5000 {
         let rt = ((instr >> 16) & 0x1f) as usize;
         let imm = (instr & 0xffff) as i16 as i32 as i64;
         let v = self.state.gpr(rs).wrapping_add(imm as u64);
-        self.state.set_gpr(rt, v);
+        self.state.set_gpr(rt, (v as u32 as i32 as i64) as u64);
     }
 
     fn slti(&mut self, instr: u32, signed: bool) {
@@ -813,7 +1058,7 @@ impl R5000 {
         let v = if signed {
             ((self.state.gpr(rs) as i64) < imm as i64) as u64
         } else {
-            (self.state.gpr(rs) < (imm as u32 as u64)) as u64
+            (self.state.gpr(rs) < (imm as i64 as u64)) as u64
         };
         self.state.set_gpr(rt, v);
     }
@@ -821,31 +1066,32 @@ impl R5000 {
     fn andi(&mut self, instr: u32) {
         let rs = ((instr >> 21) & 0x1f) as usize;
         let rt = ((instr >> 16) & 0x1f) as usize;
-        let imm = (instr & 0xffff) as u64;
-        let v = self.state.gpr(rs) & imm;
-        self.state.set_gpr(rt, v);
+        let imm = (instr & 0xffff) as u32;
+        let v = (self.state.gpr(rs) as u32) & imm;
+        self.state.set_gpr(rt, (v as i32 as i64) as u64);
     }
 
     fn ori(&mut self, instr: u32) {
         let rs = ((instr >> 21) & 0x1f) as usize;
         let rt = ((instr >> 16) & 0x1f) as usize;
-        let imm = (instr & 0xffff) as u64;
-        let v = self.state.gpr(rs) | imm;
-        self.state.set_gpr(rt, v);
+        let imm = (instr & 0xffff) as u32;
+        let v = (self.state.gpr(rs) as u32) | imm;
+        self.state.set_gpr(rt, (v as i32 as i64) as u64);
     }
 
     fn xori(&mut self, instr: u32) {
         let rs = ((instr >> 21) & 0x1f) as usize;
         let rt = ((instr >> 16) & 0x1f) as usize;
-        let imm = (instr & 0xffff) as u64;
-        let v = self.state.gpr(rs) ^ imm;
-        self.state.set_gpr(rt, v);
+        let imm = (instr & 0xffff) as u32;
+        let v = (self.state.gpr(rs) as u32) ^ imm;
+        self.state.set_gpr(rt, (v as i32 as i64) as u64);
     }
 
     fn lui(&mut self, instr: u32) {
         let rt = ((instr >> 16) & 0x1f) as usize;
-        let imm = (instr & 0xffff) as u64;
-        self.state.set_gpr(rt, imm << 16);
+        let imm = (instr & 0xffff) as u32;
+        let v = imm.wrapping_shl(16);
+        self.state.set_gpr(rt, (v as i32 as i64) as u64);
     }
 
     // === Loads and stores ===
@@ -1167,6 +1413,9 @@ impl R5000 {
                         // ERET - Exception Return
                         let target = self.cp0.eret();
                         self.state.next_pc = target;
+                        self.state.pipeline_restart = true;
+                        self.state.pending_branch = None;
+                        self.state.nullify_delay_slot = false;
                     }
                     0x20 => {
                         // WAIT - Wait for interrupt (R5000)
@@ -1250,10 +1499,9 @@ impl R5000 {
                 let take_branch = (cond_bit != 0) == (tf != 0);
                 
                 if take_branch {
-                    self.branch_offset(imm);
-                } else if likely {
-                    // Branch likely not taken: nullify the delay slot instruction
-                    self.state.nullify_delay_slot = true;
+                    self.branch_taken(imm);
+                } else {
+                    self.branch_not_taken(likely);
                 }
             }
             0x10..=0x1f => {
@@ -1647,6 +1895,9 @@ impl R5000 {
     fn exception(&mut self, code: ExceptionCode) {
         let vector = self.cp0.take_exception(&mut self.state, code);
         self.state.next_pc = vector;
+        self.state.pipeline_restart = true;
+        self.state.pending_branch = None;
+        self.state.nullify_delay_slot = false;
     }
 
     /// MADD/MADDU helper (MIPS IV): multiply-add to HI/LO.
@@ -1699,13 +1950,47 @@ impl R5000 {
 
 /// Map a CP0 register index (0–31) to a [`Cp0Reg`], defaulting to a safe
 /// register for out-of-range indices.
+/// MIPS IV CP0 register-map: enumerator value == CP0 register number.
+///
+/// Matches the PROM's `definitions.h` (`CP0_STATUS 12`, `CP0_CAUSE 13`,
+/// `CP0_EPC 14`, `CP0_LLADDR 17`, …) and the VR5000/VR12000 datasheets.
+/// Reserved slots (7, 21–25, 31) map to a quiescent register (TagLo) so
+/// `mfc0`/`mtc0` on them reads 0 and ignores writes.
 fn reg_from_index(index: usize) -> Cp0Reg {
     use Cp0Reg::*;
     const REGS: [Cp0Reg; 32] = [
-        Index, Random, EntryLo0, EntryLo1, Context, PageMask, Wired, BadVAddr, Count, EntryHi,
-        Compare, Status, Cause, Epc, PrId, Config, LlAddr, WatchLo, WatchHi, XContext, Ecc,
-        CacheErr, TagLo, TagHi, ErrorEpc, ErrorEpc, ErrorEpc, ErrorEpc, ErrorEpc, ErrorEpc,
-        ErrorEpc, ErrorEpc,
+        Index,     //  0
+        Random,    //  1
+        EntryLo0,  //  2
+        EntryLo1,  //  3
+        Context,   //  4
+        PageMask,  //  5
+        Wired,     //  6
+        TagLo,     //  7 (reserved)
+        BadVAddr,  //  8
+        Count,     //  9
+        EntryHi,   // 10
+        Compare,   // 11
+        Status,    // 12
+        Cause,     // 13
+        Epc,       // 14
+        PrId,      // 15
+        Config,    // 16
+        LlAddr,    // 17
+        WatchLo,   // 18
+        WatchHi,   // 19
+        XContext,  // 20
+        TagLo,     // 21 (reserved)
+        TagLo,     // 22 (reserved)
+        TagLo,     // 23 (reserved)
+        TagLo,     // 24 (reserved)
+        TagLo,     // 25 (reserved)
+        Ecc,       // 26
+        CacheErr,  // 27
+        TagLo,     // 28
+        TagHi,     // 29
+        ErrorEpc,  // 30
+        TagLo,     // 31 (reserved)
     ];
     REGS[index.min(31)]
 }
@@ -1805,11 +2090,15 @@ mod tests {
         let mut mem = TestMem::new(0x2000);
         cpu.state.pc = 0x1000;
 
-        // JAL 0x2000  => 0x0c00_0800
+        // JAL 0x2000  => 0x0c00_0800; delay slot at 0x1004 (NOP)
         mem.write32(0x1000, 0x0c00_0800);
 
         cpu.step(&mut mem);
         assert_eq!(cpu.state.gpr(31), 0x1008);
+        // The delay slot executes before the jump itself.
+        assert_eq!(cpu.state.pc, 0x1004);
+
+        cpu.step(&mut mem);
         assert_eq!(cpu.state.pc, 0x2000);
     }
 }

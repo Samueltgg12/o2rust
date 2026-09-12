@@ -71,6 +71,17 @@ pub mod ip32 {
     /// Firmware virtual memory address (where POST/sloader copies firmware).
     pub const PROM_VMA_BASE: u32 = 0x8100_0000;
 
+    /// General Dispatch Address (GDA): a small scratch table in low RAM that
+    /// a boot service fills in to hand execution back to an OS image. The
+    /// PROM's `warm_start` validates the magic ("XFER"), then jumps to the
+    /// entry at offset 8. (decompiled PROM definitions.h: `GDA_ADDR`,
+    /// `GDA_MAGIC`.)
+    pub const GDA_ADDR: u32 = 0x8000_0400; // KSEG0 | 0x400 -> physical 0x400
+    /// GDA magic value ("XFER"), probed by `warm_start`.
+    pub const GDA_MAGIC: u32 = 0x5846_4552;
+    /// Offset (bytes) of the jump address within the GDA.
+    pub const GDA_ENTRY_OFFSET: u32 = 0x8;
+
     /// Size of the PROM window (512 KiB).
     pub const SYSTEM_ROM_WINDOW_SIZE: u32 = 0x0008_0000;
 

@@ -383,6 +383,29 @@ impl Cp0 {
         self.regs[Cp0Reg::Count as usize] = self.regs[Cp0Reg::Count as usize].wrapping_add(1);
         self.update_random();
     }
+
+    /// Bulk-advance Count and Random by `n` cycles (delay-loop fast-forward).
+    pub fn tick_n(&mut self, n: u64) {
+        if n == 0 {
+            return;
+        }
+        self.regs[Cp0Reg::Count as usize] =
+            self.regs[Cp0Reg::Count as usize].wrapping_add(n as u32);
+        // Random is a 0..47 countdown that resets to 47 every time it reaches
+        // `wired`. Compute the final value in closed form instead of looping.
+        let w = self.wired as i64;
+        let mut r = self.random as i64;
+        if r < w {
+            r = 47;
+        }
+        let period = 48 - w;
+        let rfinal = if period <= 0 {
+            47
+        } else {
+            w + (r - w - n as i64).rem_euclid(period)
+        };
+        self.random = (rfinal & 0x3f) as u32;
+    }
 }
 
 #[cfg(test)]

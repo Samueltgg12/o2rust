@@ -14,8 +14,15 @@ pub struct CpuState {
     pub fpr: [u64; 32],
     /// Program counter.
     pub pc: u32,
-    /// Next program counter (used for branch delay slots).
+    /// Next program counter (fall-through, or exception/ERET vector).
     pub next_pc: u32,
+    /// Address to resume at *after* the current branch's delay slot has
+    /// executed. Set by every branch/jump; `None` between non-branch
+    /// instructions and after a delay slot has committed.
+    pub pending_branch: Option<u32>,
+    /// Set when an exception or ERET restarts the pipeline immediately,
+    /// bypassing any pending branch delay slot.
+    pub pipeline_restart: bool,
     /// Multiply/divide high result.
     pub hi: u64,
     /// Multiply/divide low result.
@@ -28,7 +35,7 @@ pub struct CpuState {
     pub llbit: bool,
     /// Load-linked reservation address.
     pub lladdr: u32,
-    /// Whether the next instruction is a branch delay slot.
+    /// Whether the current instruction is a branch delay slot.
     pub in_delay_slot: bool,
     /// Whether the delay slot instruction should be nullified (branch likely not taken).
     pub nullify_delay_slot: bool,
@@ -43,6 +50,8 @@ impl Default for CpuState {
             fpr: [0; 32],
             pc: crate::ip32::PROM_RESET_VECTOR,
             next_pc: crate::ip32::PROM_RESET_VECTOR + 4,
+            pending_branch: None,
+            pipeline_restart: false,
             hi: 0,
             lo: 0,
             fcr0: 0,

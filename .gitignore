@@ -4,3 +4,4 @@ samples/netbsd
 samples/irixsrc
 build/
 build-asan/
+samples/gxemul-0.7.0

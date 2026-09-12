@@ -148,7 +148,17 @@ pub struct CrimeCpuInterface {
     mem_error_ecc_repl: u32,
     /// Set when a hard/soft reset is written to the control register. The
     /// system loop checks this and resets the CPU to the reset vector.
-    reset_requested: bool,
+    reset_requested: Option<CrimeResetKind>,
+}
+
+/// What kind of system reset CRIME's control register requested.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CrimeResetKind {
+    /// CRIME_CONTROL_SOFT_RESET: a CPU warm reset that preserves enough of
+    /// the machine state for the PROM to take its warm-start path.
+    Soft,
+    /// CRIME_CONTROL_HARD_RESET: a full machine reset.
+    Hard,
 }
 
 impl Default for CrimeCpuInterface {
@@ -175,7 +185,7 @@ impl Default for CrimeCpuInterface {
             mem_error_ecc_syn: 0,
             mem_error_ecc_chk: 0,
             mem_error_ecc_repl: 0,
-            reset_requested: false,
+            reset_requested: None,
         }
     }
 }
@@ -199,13 +209,39 @@ impl CrimeCpuInterface {
     }
 
     /// Whether a hard/soft reset has been requested via the control register.
-    pub fn reset_requested(&self) -> bool {
+    pub fn reset_requested(&self) -> Option<CrimeResetKind> {
         self.reset_requested
     }
 
     /// Clear the reset request flag (called after the system resets the CPU).
     pub fn clear_reset_request(&mut self) {
-        self.reset_requested = false;
+        self.reset_requested = None;
+    }
+
+    /// Advance the free-running 64-bit timestamp (/dev/zero for the PROM's
+    /// `warm_start` timeout and time-of-day) by `delta` — nominally one ~133
+    /// MHz VCLK tick per CPU cycle.
+    pub fn advance_time(&mut self, delta: u64) {
+        let t = ((self.time_hi as u64) << 32) | (self.time_lo as u64);
+        let t = t.wrapping_add(delta);
+        self.time_hi = (t >> 32) as u32;
+        self.time_lo = t as u32;
+    }
+
+    /// Write the CRM_CONTROL register and check for a reset request.
+    fn write_control(&mut self, value: u32) {
+        self.control = value & 0x3fff; // Mask per spec
+        // A hard or soft reset written to the control register resets the
+        // entire system (including the CPU). Signal the system loop to reset
+        // the CPU back to the reset vector; a soft reset takes the PROM's
+        // warm-start path, a hard reset takes the cold path.
+        if value & crime_control::HARD_RESET != 0 {
+            self.reset_requested = Some(CrimeResetKind::Hard);
+        } else if value & crime_control::SOFT_RESET != 0 {
+            self.reset_requested = Some(CrimeResetKind::Soft);
+        } else {
+            self.reset_requested = None;
+        }
     }
 
     /// Get the interrupt status for the CPU.
@@ -236,14 +272,20 @@ impl AddressSpace for CrimeCpuInterface {
     fn read32(&mut self, addr: u32) -> u32 {
         match addr {
             crime_cpu::CRM_ID => self.id,
+            // CRM_CONTROL is a 32-bit register living in the *low* lane of its
+            // 64-bit big-endian slot (offset +4 on the bus). Both lane accesses
+            // return the control word so `lw`/`ld` see the same value.
             crime_cpu::CRM_CONTROL => self.control,
+            a if a == crime_cpu::CRM_CONTROL + 4 => self.control,
             crime_cpu::CRM_INTSTAT => self.intstat,
             crime_cpu::CRM_INTMASK => self.intmask,
             crime_cpu::CRM_SOFTINT => self.softint,
             crime_cpu::CRM_HARDINT => self.hardint,
             crime_cpu::CRM_DOG => self.dog,
-            crime_cpu::CRM_TIME => self.time_lo,
-            a if a == crime_cpu::CRM_TIME + 4 => self.time_hi,
+            // 64-bit big-endian slot: the high lane holds time_hi (bits 63:32),
+            // the low lane holds time_lo (bits 31:0).
+            crime_cpu::CRM_TIME => self.time_hi,
+            a if a == crime_cpu::CRM_TIME + 4 => self.time_lo,
             crime_cpu::CRM_CPU_ERROR_ADDR => self.cpu_error_addr,
             crime_cpu::CRM_CPU_ERROR_STAT => self.cpu_error_stat,
             crime_cpu::CRM_CPU_ERROR_ENA => self.cpu_error_ena,
@@ -266,6 +308,9 @@ impl AddressSpace for CrimeCpuInterface {
     fn read64(&mut self, addr: u32) -> u64 {
         if addr == crime_cpu::CRM_TIME {
             ((self.time_hi as u64) << 32) | (self.time_lo as u64)
+        } else if addr == crime_cpu::CRM_CONTROL {
+            // 32-bit register in the low lane of its 64-bit slot.
+            self.control as u64
         } else {
             ((self.read32(addr) as u64) << 32) | (self.read32(addr.wrapping_add(4)) as u64)
         }
@@ -281,14 +326,14 @@ impl AddressSpace for CrimeCpuInterface {
 
     fn write32(&mut self, addr: u32, value: u32) {
         match addr {
+            // CRM_CONTROL is a 32-bit register in the low lane (offset +4) of
+            // its 64-bit slot. Honor writes to either lane; the interesting
+            // bits (reset, endianness, high-water marks) live in the low word.
             crime_cpu::CRM_CONTROL => {
-                self.control = value & 0x3fff; // Mask per spec
-                // A hard or soft reset written to the control register resets
-                // the entire system (including the CPU). Signal the system
-                // loop to reset the CPU back to the reset vector.
-                if value & (crime_control::HARD_RESET | crime_control::SOFT_RESET) != 0 {
-                    self.reset_requested = true;
-                }
+                self.write_control(value);
+            }
+            a if a == crime_cpu::CRM_CONTROL + 4 => {
+                self.write_control(value);
             }
             crime_cpu::CRM_INTMASK => {
                 self.intmask = value;
@@ -304,11 +349,13 @@ impl AddressSpace for CrimeCpuInterface {
             crime_cpu::CRM_DOG => {
                 self.dog = value & 0x1f_ffff; // Mask per spec
             }
+            // 64-bit big-endian slot: the high lane holds time_hi (bits 63:32),
+            // the low lane holds time_lo (bits 31:0).
             crime_cpu::CRM_TIME => {
-                self.time_lo = value;
+                self.time_hi = value;
             }
             a if a == crime_cpu::CRM_TIME + 4 => {
-                self.time_hi = value;
+                self.time_lo = value;
             }
             crime_cpu::CRM_CPU_ERROR_ENA => {
                 self.cpu_error_ena = value & 0x7;
@@ -339,6 +386,12 @@ impl AddressSpace for CrimeCpuInterface {
         if addr == crime_cpu::CRM_TIME {
             self.time_lo = value as u32;
             self.time_hi = (value >> 32) as u32;
+        } else if addr == crime_cpu::CRM_CONTROL {
+            // The firmware (`soft_reset`/`hard_reset` in sloader) writes the
+            // reset bits with a single 64-bit `sd`. On the big-endian bus the
+            // significant half of the CRM_CONTROL slot lands in the low lane
+            // (offset +4); apply it to the 32-bit control register.
+            self.write_control(value as u32);
         } else {
             self.write32(addr, (value >> 32) as u32);
             self.write32(addr.wrapping_add(4), value as u32);

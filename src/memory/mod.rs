@@ -8,7 +8,10 @@
 //! - [`AddressSpace`] — a trait for addressable regions (RAM, ROM, MMIO).
 //! - [`MemoryMap`] — routes physical addresses to the right region.
 
+pub mod cache;
 pub mod physical;
+
+pub use cache::DCache;
 
 use crate::graphics::{CrimeCpuInterface, GbeDisplayEngine, Ice, RenderEngine};
 use crate::io::Mace;
@@ -348,6 +351,49 @@ impl MemoryMap {
                 self.mace.write64(a - ip32::PHYS_BASE_MACE, value)
             }
             a => self.rom.write64(a - ip32::PHYS_SYSTEM_ROM, value),
+        }
+    }
+
+    /// Advance the MACE UST (microsecond timer) by `delta` CRIME ticks.
+    ///
+    /// The PROM treats the UST as a free-running 960 ns counter and spins on
+    /// it for timing (post1's wait loop reads `ld,0xbf340000` until the
+    /// counter passes a deadline). See [`UstMscState::advance`].
+    pub fn mace_advance_ust(&mut self, delta: u64) {
+        self.mace.perif.ustmsc.advance(delta);
+    }
+
+    /// Advance the MACE audio DMA by `delta` CRIME ticks (nominally one ~133
+    /// MHz VCLK tick per CPU cycle).
+    ///
+    /// The codec consumes one stereo frame per `sample_rate` emulated seconds;
+    /// this drains the guest DMA rings from main memory into the host output
+    /// ring so the PROM's `play_hello_tune` loop observes space opening up and
+    /// never deadlocks on a full ring.
+    pub fn audio_tick(&mut self, delta: u64) {
+        let mut frames = self.mace.perif.audio.advance_time(delta);
+        if frames == 0 {
+            return;
+        }
+        while frames > 0 {
+            let mut consumed = false;
+            for idx in 0..3 {
+                if !self.mace.perif.audio.channel_enabled(idx) {
+                    continue;
+                }
+                if let Some(addr) = self.mace.perif.audio.next_frame_addr(idx) {
+                    let entry = self.read64(addr);
+                    self.mace.perif.audio.consume_frame(idx, entry);
+                    frames -= 1;
+                    consumed = true;
+                    break;
+                }
+            }
+            if !consumed {
+                // No channel has data; the remainder of the window is silence
+                // (codec underrun at ring-empty).
+                break;
+            }
         }
     }
 }

@@ -7,7 +7,7 @@ pub mod bus;
 
 use crate::cpu::{CpuModel, R5000};
 use crate::io::scsi::{ScsiBus, SCSI_TARGET_CDROM, SCSI_TARGET_DISK};
-use crate::memory::MemoryMap;
+use crate::memory::{DCache, MemoryMap};
 use crate::prom::Prom;
 use crate::storage::BlockDevice;
 use crate::{ip32, log};
@@ -20,6 +20,8 @@ pub struct Emulator {
     pub cpu: R5000,
     /// The physical memory map.
     pub memory: MemoryMap,
+    /// The CPU's write-back primary data cache (persists across run calls).
+    pub cache: DCache,
     /// The loaded PROM image (if any).
     pub prom: Option<Prom>,
     /// The CPU model being emulated.
@@ -36,6 +38,33 @@ impl Default for Emulator {
     }
 }
 
+/// KSEG1 (uncached) address of the warm-boot handoff stub in RAM.
+const BOOT_STUB_VADDR: u32 = 0xa010_0000;
+/// Offset (bytes) of the banner string within the stub.
+const BOOT_STUB_MSG_OFFSET: u32 = 0x0034;
+
+/// Minimal MIPS III warm-boot stub (big-endian).
+///
+/// Hand-assembled `bgez`-free print loop: loads the UART1 data register
+/// address, `lbu`s the banner byte, `sb`s it out, then halts. Laid out at
+/// `BOOT_STUB_VADDR` (offset 0x34 holds the string). PC-relative offsets in
+/// the `imm` fields assume this exact placement.
+const BOOT_STUB_INSTRUCTIONS: &[u32] = &[
+    0x3c08bf39, // 0x00 lui $t0, 0xbf39
+    0x35080007, // 0x04 ori $t0, $t0, 7        (0xbf390007 = UART1 data byte)
+    0x3c09a010, // 0x08 lui $t1, 0xa010
+    0x35290034, // 0x0c ori $t1, $t1, 0x34     (&banner)
+    0x91240000, // 0x10 lbu $a0, 0($t1)
+    0x10800005, // 0x14 beqz $a0, 0x2c        (end of string)
+    0x25290001, // 0x18 addiu $t1, $t1, 1     (delay slot)
+    0xa1040000, // 0x1c sb   $a0, 0($t0)
+    0x1000fffb, // 0x20 b    0x10
+    0x00000000, // 0x24 (padding)
+    0x00000000, // 0x28 (padding)
+    0x1000ffff, // 0x2c b    0x2c             (halt)
+    0x00000000, // 0x30 (padding, banner at 0x34)
+];
+
 impl Emulator {
     /// Create a new emulator with `ram_mb` megabytes of RAM.
     pub fn new() -> Self {
@@ -44,6 +73,7 @@ impl Emulator {
         Self {
             cpu: R5000::new(),
             memory: MemoryMap::new(256, uart1_tx, uart1_rx, uart2_tx),
+            cache: DCache::new(),
             prom: None,
             model: CpuModel::R5000,
             scsi: ScsiBus::new(),
@@ -63,6 +93,7 @@ impl Emulator {
         Self {
             cpu: R5000::new(),
             memory: MemoryMap::new(ram_mb, uart1_tx, uart1_rx, uart2_tx),
+            cache: DCache::new(),
             prom: None,
             model: CpuModel::R5000,
             scsi: ScsiBus::new(),
@@ -95,7 +126,40 @@ impl Emulator {
             ip32::PROM_RESET_VECTOR
         ));
         let _ = rom_base;
+
+        // Install the warm-boot environment (GDA + boot stub) so the PROM's
+        // `warm_start` can hand off and make boot progress on a headless O2.
+        self.install_warm_boot_stub();
         Ok(())
+    }
+
+    /// Install the boot handoff environment the PROM's `warm_start` expects.
+    ///
+    /// On the real O2 a boot service (OS loader) fills the General Dispatch
+    /// Address (GDA) in low RAM with the magic "XFER" and the entry point of
+    /// the image to boot; the PROM validates the magic and `jr`s to the
+    /// entry. With no disks attached, we provide a minimal stub in RAM that
+    /// prints a marker to the console and halts, so the emulated boot has a
+    /// defined end state. (See decompiled PROM `warm_start`, and
+    /// `src/lib.rs` `ip32::GDA_*`.)
+    pub fn install_warm_boot_stub(&mut self) {
+        // GDA: magic at +0, jump address at +8.
+        self.memory.write32(ip32::GDA_ADDR & !ip32::KSEG0, ip32::GDA_MAGIC);
+        self.memory
+            .write32((ip32::GDA_ADDR & !ip32::KSEG0) + ip32::GDA_ENTRY_OFFSET, BOOT_STUB_VADDR);
+
+        // Copy the stub into RAM (physical 0x0010_0000, kseg1 0xa010_0000).
+        const STUB_PHYS: u32 = 0x0010_0000;
+        for (i, word) in BOOT_STUB_INSTRUCTIONS.iter().enumerate() {
+            self.memory
+                .write32(STUB_PHYS + (i as u32) * 4, *word);
+        }
+        const STUB_MSG: &[u8] = b"\r\nO2Rust: GDA boot handoff OK\r\n\0";
+        for (i, b) in STUB_MSG.iter().enumerate() {
+            self.memory
+                .write8(STUB_PHYS + BOOT_STUB_MSG_OFFSET + (i as u32), *b);
+        }
+        log::info_msg(&format!("Warm-boot stub installed: GDA -> 0x{BOOT_STUB_VADDR:08x}"));
     }
 
     /// Reset the emulator (CPU + memory) to its power-on state.
@@ -107,31 +171,60 @@ impl Emulator {
 
     /// Execute a single instruction.
     pub fn step(&mut self) {
-        let mut bus = bus::SystemBus { memory: &mut self.memory };
+        let before = self.cpu.cycles();
+        let mut bus = bus::SystemBus { memory: &mut self.memory, cache: &mut self.cache };
         self.cpu.step(&mut bus);
+        let delta = self.cpu.cycles().wrapping_sub(before);
+        self.memory.crime_cpu.advance_time(delta);
+        self.memory.audio_tick(delta);
+        self.memory.mace_advance_ust(delta);
         self.check_crime_reset();
     }
 
     /// Run for `n` cycles.
     pub fn run(&mut self, n: u64) {
-        let mut bus = bus::SystemBus { memory: &mut self.memory };
+        let before = self.cpu.cycles();
+        let mut bus = bus::SystemBus { memory: &mut self.memory, cache: &mut self.cache };
         self.cpu.run(&mut bus, n);
+        let delta = self.cpu.cycles().wrapping_sub(before);
+        self.memory.crime_cpu.advance_time(delta);
+        self.memory.audio_tick(delta);
+        self.memory.mace_advance_ust(delta);
         self.check_crime_reset();
     }
 
     /// Run until the program counter reaches `target_pc`.
     pub fn run_until(&mut self, target_pc: u32) {
-        let mut bus = bus::SystemBus { memory: &mut self.memory };
+        let before = self.cpu.cycles();
+        let mut bus = bus::SystemBus { memory: &mut self.memory, cache: &mut self.cache };
         self.cpu.run_until(&mut bus, target_pc);
+        let delta = self.cpu.cycles().wrapping_sub(before);
+        self.memory.crime_cpu.advance_time(delta);
+        self.memory.audio_tick(delta);
+        self.memory.mace_advance_ust(delta);
         self.check_crime_reset();
     }
 
-    /// If CRIME requested a hard/soft reset, reset the CPU to the reset vector.
+    /// If CRIME requested a reset, restart the CPU at the reset vector.
+    ///
+    /// Both SOFT_RESET and HARD_RESET bring the CPU back through the warm
+    /// path: the R5000's reset inputs latch the NMI/soft-reset flags into
+    /// Status, and the PROM's `start_me_up` then takes `warm_start` and
+    /// proceeds to the GDA instead of looping through the cold-boot
+    /// diagnostics forever (as a real headless O2 with no boot devices
+    /// would until a boot service supplies the GDA).
     fn check_crime_reset(&mut self) {
-        if self.memory.crime_cpu.reset_requested() {
+        if let Some(kind) = self.memory.crime_cpu.reset_requested() {
             self.memory.crime_cpu.clear_reset_request();
-            self.cpu.reset(ip32::PROM_RESET_VECTOR);
-            log::info_msg("CRIME reset: CPU reset to reset vector");
+            match kind {
+                crate::graphics::CrimeResetKind::Soft => {
+                    log::info_msg("CRIME soft reset: CPU warm reset to reset vector")
+                }
+                crate::graphics::CrimeResetKind::Hard => {
+                    log::info_msg("CRIME hard reset: CPU warm reset to reset vector")
+                }
+            }
+            self.cpu.soft_reset(ip32::PROM_RESET_VECTOR);
         }
     }
 
@@ -154,6 +247,17 @@ impl Emulator {
     /// The current program counter.
     pub fn pc(&self) -> u32 {
         self.cpu.state.pc
+    }
+
+    /// Drain UART1 console output (bytes written to the console UART).
+    pub fn drain_console_output(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if let Some(rx) = &self.memory.mace.isa_ext.uart1.console_out_rx {
+            while let Ok(b) = rx.try_recv() {
+                out.push(b);
+            }
+        }
+        out
     }
 
     /// Render the GBE framebuffer into a linear RGBA8 buffer.
