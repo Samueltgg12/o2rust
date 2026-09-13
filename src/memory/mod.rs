@@ -141,12 +141,13 @@ impl MemoryMap {
         }
 
         for y in 0..height {
-            let tile_y = y / TILE_LINES;
-            let line_in_tile = y % TILE_LINES;
+            // The RE addresses tiles in GL convention (origin at bottom,
+            // tiles delivered bottom-to-top); the GBE scans out top-down,
+            // so the framebuffer image is 180°-rotated in tile memory.
+            let ym = height - 1 - y;
+            let tile_y = ym / TILE_LINES;
+            let line_in_tile = ym % TILE_LINES;
             for x in 0..width {
-                // The tile memory is laid out right-to-left across the
-                // screen (the RE delivers framebuffer stores in the opposite
-                // X direction from the GBE's scan-out).
                 let xm = width - 1 - x;
                 let tile_x = xm / pixels_per_tile_row;
                 let px_in_tile = xm % pixels_per_tile_row;

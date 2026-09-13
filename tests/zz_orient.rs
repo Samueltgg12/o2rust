@@ -57,10 +57,27 @@ fn zz_orient() {
     let mut out = vec![0u8; w * h * 4];
     mem.render_framebuffer(&mut out);
 
-    // Print ASCII art of the region y 0..60, x 60..260
+    // Dump tile memory directly: line row y=10 bytes x 80..220, rect y=25 x..
+    let mem_bytes = |mem: &MemoryMap, y: usize| -> String {
+        let mut s = String::new();
+        for x in 80..230usize {
+            // tile 0 covers x 0..511; bytes BE; index = y*512 + x at phys 0x10000
+            let b = mem.ram.as_slice()[0x10000 + y * 512 + x];
+            s.push(if b != 0 { '#' } else { '.' });
+        }
+        s
+    };
+    for y in [9usize, 10, 11] {
+        eprintln!("mem y={y}: {}", mem_bytes(&mem, y));
+    }
+    for y in [19usize, 25, 39, 41] {
+        eprintln!("mem y={y}: {}", mem_bytes(&mem, y));
+    }
+
+    // ASCII art of rendered region x 700..1000, y 0..60 (post-scan-out flip)
     for y in 0..60 {
         let mut line = String::new();
-        for x in 60..260 {
+        for x in 700..1000 {
             let o = (y * w + x) * 4;
             line.push(if out[o] > 0 || out[o + 1] > 0 || out[o + 2] > 0 { '#' } else { '.' });
         }
