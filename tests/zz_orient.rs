@@ -83,4 +83,13 @@ fn zz_orient() {
         }
         eprintln!("{line}");
     }
+    // Scan ALL rows to find where any dot landed.
+    for x in [100usize, 105, 205, 815, 920] {
+        let mut rows = vec![];
+        for y in 0..128 {
+            let o = (y * w + x) * 4;
+            if out[o] > 0 { rows.push(y); }
+        }
+        eprintln!("render column x={x}: dots at y = {rows:?}");
+    }
 }

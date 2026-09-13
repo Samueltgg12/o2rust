@@ -17,6 +17,8 @@ pub mod scsi;
 
 pub use scsi::{SCSI_TARGET_CDROM, SCSI_TARGET_DISK, ScsiBus};
 
+pub mod ahc;
+
 use std::collections::VecDeque;
 
 /// MACE base address (IRIX `mace.h`).
@@ -41,37 +43,62 @@ pub mod offsets {
 }
 
 /// PCI Host Bridge registers (offset 0x080000 from MACE_BASE).
-/// Sourced from Linux `arch/mips/include/asm/ip32/mace.h` and IRIX `mace.h`.
+/// Sourced from the IRIX PROM `mace.h` (`stand/arcs/IP32prom/include/mace.h`)
+/// and Linux `arch/mips/include/asm/ip32/mace.h` / `arch/mips/pci/ops-mace.c`.
 pub mod pci {
     pub const BASE: u32 = 0x080000;
 
-    // PCI Configuration Space
-    pub const CFG_ADDR: u32 = 0x0000;  // Configuration address
-    pub const CFG_DATA: u32 = 0x0004;  // Configuration data
+    // Error address / flags, control, and revision (64-bit register slots,
+    // low 32-bit lane used on the big-endian bus).
+    pub const ERROR_ADDR: u32 = 0x0000;
+    pub const ERROR_FLAGS: u32 = 0x0004;
+    pub const CONTROL: u32 = 0x0008;
+    pub const REV_INFO: u32 = 0x000C; // read; writing this offset is a FLUSH
 
-    // PCI Memory Space
-    pub const MEM_BASE: u32 = 0x0010;  // Memory base address
-    pub const MEM_LIMIT: u32 = 0x0014; // Memory limit address
+    // Config space access (Linux `ops-mace.c`, PROM `pci_intf.c`).
+    // `config_addr = (bus << 16) | (devfn << 8) | (reg & 0xfc)`.
+    pub const CONFIG_ADDR: u32 = 0x0CF8;
+    pub const CONFIG_DATA: u32 = 0x0CFC;
 
-    // PCI I/O Space
-    pub const IO_BASE: u32 = 0x0018;   // I/O base address
-    pub const IO_LIMIT: u32 = 0x001C;  // I/O limit address
+    // PCI address windows (IRIX `mace.h`).
+    pub const LOW_MEMORY: u32 = 0x1A00_0000;
+    pub const LOW_IO: u32 = 0x1800_0000;
+    pub const NATIVE_VIEW: u32 = 0x4000_0000;
+    pub const IO_FLAG: u32 = 0x8000_0000;
 
-    // PCI Control/Status
-    pub const CTRL: u32 = 0x0020;      // PCI control register
-    pub const STATUS: u32 = 0x0024;    // PCI status register
+    // PCI error flags (IRIX `mace.h`).
+    pub const PERR_MASTER_ABORT: u32 = 0x8000_0000;
+    pub const PERR_TARGET_ABORT: u32 = 0x4000_0000;
+    pub const PERR_DATA_PARITY_ERR: u32 = 0x2000_0000;
+    pub const PERR_RETRY_ERR: u32 = 0x1000_0000;
+    pub const PERR_ILLEGAL_CMD: u32 = 0x0800_0000;
+    pub const PERR_SYSTEM_ERR: u32 = 0x0400_0000;
+    pub const PERR_INTERRUPT_TEST: u32 = 0x0200_0000;
+    pub const PERR_PARITY_ERR: u32 = 0x0100_0000;
+    pub const PERR_OVERRUN: u32 = 0x0080_0000;
 
-    // PCI Interrupt
-    pub const INT_ACK: u32 = 0x0028;   // Interrupt acknowledge
-    pub const INT_MASK: u32 = 0x002C;  // Interrupt mask
+    // PCI control register bits (Linux `asm/ip32/mace.h`).
+    pub const CTRL_INV_INT: u32 = 0x00FF_0000;
+    pub const CTRL_OVERUN_INT: u32 = 0x0100_0000;
+    pub const CTRL_PARITY_INT: u32 = 0x0200_0000;
+    pub const CTRL_SERR_INT: u32 = 0x0400_0000;
+    pub const CTRL_IT_INT: u32 = 0x0800_0000;
+    pub const CTRL_RE_INT: u32 = 0x1000_0000;
+    pub const CTRL_DPED_INT: u32 = 0x2000_0000;
+    pub const CTRL_TAR_INT: u32 = 0x4000_0000;
+    pub const CTRL_MAR_INT: u32 = 0x8000_0000;
 
-    // PCI Arbiter
-    pub const ARB_CTRL: u32 = 0x0030;  // Arbiter control
-    pub const ARB_PRI: u32 = 0x0034;   // Arbiter priority
+    // On-board PCI device map (Linux `ops-mace.c`, `fixup-ip32.c`,
+    // `docs/register-maps.md`). Device ids are devfn >> 3.
+    pub const DEV_SCSI0_DEVFN: u32 = 0x08; // device 1
+    pub const DEV_SCSI1_DEVFN: u32 = 0x10; // device 2
+    pub const DEV_SLOT_DEVFN: u32 = 0x18; // expansion slot
+    pub const DEV_NC0_DEVFN: u32 = 0x00; // device 0, N/C
+    pub const DEV_NC1_DEVFN: u32 = 0x20; // device 4, N/C
 
-    // PCI Error
-    pub const ERR_ADDR: u32 = 0x0038;  // Error address
-    pub const ERR_CMD: u32 = 0x003C;   // Error command
+    // IRQ routing: SCSI0 = crime interrupt 8, SCSI1 = crime interrupt 9.
+    pub const IRQ_SCSI0: u32 = 8;
+    pub const IRQ_SCSI1: u32 = 9;
 }
 
 /// Ethernet MAC110 registers (offset 0x280000 from MACE_BASE).
@@ -329,6 +356,9 @@ pub mod vout {
 pub struct Mace {
     /// PCI Host Bridge state
     pub pci: PciState,
+    /// Onboard AIC-7880 controllers (SCSI0 = device 1, SCSI1 = device 2).
+    pub ahc0: ahc::Aic7880,
+    pub ahc1: ahc::Aic7880,
     /// Ethernet (MAC110) state
     pub enet: EnetState,
     /// Peripheral block state
@@ -360,6 +390,8 @@ impl Mace {
         perif.audio.out = Some(audio_out);
         Self {
             pci: PciState::default(),
+            ahc0: ahc::Aic7880::new(),
+            ahc1: ahc::Aic7880::new(),
             enet: EnetState::default(),
             perif,
             isa_ext: IsaExtState::with_console(uart1_tx, uart1_rx, uart2_tx),
@@ -393,8 +425,10 @@ impl Mace {
     /// Read a 32-bit register from MACE.
     pub fn read32(&mut self, offset: u32) -> u32 {
         match offset {
-            // PCI
-            offset if offset >= pci::BASE && offset <= pci::BASE + 0xFF => self.pci.read32(offset - pci::BASE),
+            // PCI (through CONFIG_DATA at +0xCFC)
+            offset if offset >= pci::BASE && offset <= pci::BASE + pci::CONFIG_DATA + 0x3 => {
+                self.pci.read32(offset - pci::BASE)
+            }
             // Ethernet
             offset if offset >= enet::BASE && offset <= enet::BASE + 0x1FF => self.enet.read32(offset - enet::BASE),
             // Peripheral
@@ -419,8 +453,10 @@ impl Mace {
     /// Read a 32-bit register from MACE (immutable version for read-only access).
     pub fn read32_immutable(&self, offset: u32) -> u32 {
         match offset {
-            // PCI
-            offset if offset >= pci::BASE && offset <= pci::BASE + 0xFF => self.pci.read32(offset - pci::BASE),
+            // PCI (through CONFIG_DATA at +0xCFC)
+            offset if offset >= pci::BASE && offset <= pci::BASE + pci::CONFIG_DATA + 0x3 => {
+                self.pci.read32_immutable(offset - pci::BASE)
+            }
             // Ethernet
             offset if offset >= enet::BASE && offset <= enet::BASE + 0x1FF => self.enet.read32(offset - enet::BASE),
             // Peripheral
@@ -443,8 +479,10 @@ impl Mace {
     /// Write a 32-bit register to MACE.
     pub fn write32(&mut self, offset: u32, value: u32) {
         match offset {
-            // PCI
-            offset if offset >= pci::BASE && offset <= pci::BASE + 0xFF => self.pci.write32(offset - pci::BASE, value),
+            // PCI (through CONFIG_DATA at +0xCFC)
+            offset if offset >= pci::BASE && offset <= pci::BASE + pci::CONFIG_DATA + 0x3 => {
+                self.pci.write32(offset - pci::BASE, value)
+            }
             // Ethernet
             offset if offset >= enet::BASE && offset <= enet::BASE + 0x1FF => self.enet.write32(offset - enet::BASE, value),
             // Peripheral
@@ -460,6 +498,86 @@ impl Mace {
             _ => {
                 log::warn!("MACE write32: unimplemented offset 0x{:08X} = 0x{:08X}", offset, value);
             }
+        }
+    }
+
+    /// Select the onboard controller (ahc0/ahc1) that claims `addr` through
+    /// its assigned BAR0, returning its register offset within the window.
+    fn pci_window_target_mut(&mut self, addr: u32) -> Option<(&mut ahc::Aic7880, u32)> {
+        let (devfn, off) = self.pci.bar_target(addr)?;
+        let ctrl = if devfn == pci::DEV_SCSI0_DEVFN as usize {
+            &mut self.ahc0
+        } else if devfn == pci::DEV_SCSI1_DEVFN as usize {
+            &mut self.ahc1
+        } else {
+            return None;
+        };
+        Some((ctrl, off))
+    }
+
+    /// PCI memory-window access (0x1A000000..0x1BFFFFFF), routed by BAR0.
+    pub fn pci_window_read8(&mut self, addr: u32) -> u8 {
+        match self.pci_window_target_mut(addr) {
+            Some((ctrl, off)) => ctrl.read8(off),
+            None => {
+                log::warn!("PCI window read8: nothing claims {:#010X}", addr);
+                0xFF
+            }
+        }
+    }
+
+    /// PCI memory-window read (0x1A000000..0x1BFFFFFF), routed by BAR0.
+    pub fn pci_window_read32(&mut self, addr: u32) -> u32 {
+        match self.pci_window_target_mut(addr) {
+            Some((ctrl, off)) => {
+                // Controller registers byte-addressable; wide reads assemble
+                // the big-endian word exactly like the MACE config lanes.
+                (ctrl.read8(off) as u32) << 24
+                    | (ctrl.read8(off + 1) as u32) << 16
+                    | (ctrl.read8(off + 2) as u32) << 8
+                    | ctrl.read8(off + 3) as u32
+            }
+            None => 0xFFFF_FFFF,
+        }
+    }
+
+    /// PCI memory-window write (0x1A000000..0x1BFFFFFF), routed by BAR0.
+    pub fn pci_window_write8(&mut self, addr: u32, value: u8) {
+        match self.pci_window_target_mut(addr) {
+            Some((ctrl, off)) => ctrl.write8(off, value),
+            None => log::warn!("PCI window write8: nothing claims {:#010X} = 0x{:02X}", addr, value),
+        }
+    }
+
+    /// PCI memory-window read16 (big-endian lane assembled over 2 bytes).
+    pub fn pci_window_read16(&mut self, addr: u32) -> u16 {
+        match self.pci_window_target_mut(addr) {
+            Some((ctrl, off)) => {
+                ((ctrl.read8(off) as u16) << 8) | ctrl.read8(off + 1) as u16
+            }
+            None => 0xFFFF,
+        }
+    }
+
+    /// PCI memory-window write16 (big-endian lane split over 2 bytes).
+    pub fn pci_window_write16(&mut self, addr: u32, value: u16) {
+        if let Some((ctrl, off)) = self.pci_window_target_mut(addr) {
+            ctrl.write8(off, (value >> 8) as u8);
+            ctrl.write8(off + 1, value as u8);
+        } else {
+            log::warn!("PCI window write16: nothing claims {:#010X} = 0x{:04X}", addr, value);
+        }
+    }
+
+    /// PCI memory-window write32 (big-endian lane split over 4 bytes).
+    pub fn pci_window_write32(&mut self, addr: u32, value: u32) {
+        if let Some((ctrl, off)) = self.pci_window_target_mut(addr) {
+            ctrl.write8(off, (value >> 24) as u8);
+            ctrl.write8(off + 1, (value >> 16) as u8);
+            ctrl.write8(off + 2, (value >> 8) as u8);
+            ctrl.write8(off + 3, value as u8);
+        } else {
+            log::warn!("PCI window write32: nothing claims {:#010X} = 0x{:08X}", addr, value);
         }
     }
 }
@@ -525,42 +643,199 @@ impl Default for Mace {
     }
 }
 
-/// PCI Host Bridge state.
-#[derive(Debug, Default)]
+/// A single PCI function present on the MACE PCI bus (bus 0).
+#[derive(Debug, Clone, Copy)]
+pub struct PciFunction {
+    pub present: bool,
+    /// Configuration space, indexed by PCI byte register.
+    /// Values are stored little-endian (standard PCI dword order): a
+    /// dword at register `reg` has its vendor/low bytes at reg+0..1.
+    pub config: [u8; 256],
+}
+
+impl PciFunction {
+    /// An empty, non-present function.
+    pub fn nc() -> Self {
+        PciFunction {
+            present: false,
+            config: [0; 256],
+        }
+    }
+
+    /// An Adaptec AIC-7880 (vendor 0x9004, device 0x8078).
+    /// IDs sourced from Linux `aic7xxx_pci.h` (`ID_AIC7880 0x8078900400...`);
+    /// header layout is the standard PCI type-0 header.
+    pub fn aic7880(irq_line: u8) -> Self {
+        let mut f = PciFunction::nc();
+        f.present = true;
+        f.config[0x00] = 0x04; // vendor id low  (0x9004)
+        f.config[0x01] = 0x90;
+        f.config[0x02] = 0x78; // device id low  (0x8078)
+        f.config[0x03] = 0x80;
+        f.config[0x08] = 0x00; // revision
+        f.config[0x09] = 0x00; // programming interface
+        f.config[0x0A] = 0x00; // subclass: SCSI controller
+        f.config[0x0B] = 0x01; // base class: mass storage
+        f.config[0x0E] = 0x00; // header type 0 (single function)
+        // BAR0: 256-byte memory register window -> 0xFFFFFF00 size mask.
+        f.config[0x10] = 0x00;
+        f.config[0x3C] = irq_line; // interrupt line (assigned by platform)
+        f.config[0x3D] = 0x01; // interrupt pin: INTA#
+        f
+    }
+
+    /// Read the dword at PCI register `reg` (little-endian byte order).
+    fn config_dword(&self, reg: u32) -> u32 {
+        let r = (reg & 0xFC) as usize;
+        u32::from_le_bytes([
+            self.config[r],
+            self.config[r + 1],
+            self.config[r + 2],
+            self.config[r + 3],
+        ])
+    }
+
+    /// Returns true when the function has had its memory BAR assigned a
+    /// non-zero base address (the base is the low 28 bits of BAR0).
+    pub fn bar0(&self) -> u32 {
+        if self.config[0x10] == 0xFF
+            && self.config[0x11] == 0xFF
+            && self.config[0x12] == 0xFF
+            && self.config[0x13] == 0xFF
+        {
+            // Size-detection write in progress: not yet a real base.
+            return 0;
+        }
+        u32::from_le_bytes([
+            self.config[0x10],
+            self.config[0x11],
+            self.config[0x12],
+            self.config[0x13],
+        ]) & 0xFFFF_FF00
+    }
+}
+
+/// MACE PCI Host Bridge state.
+#[derive(Debug)]
 pub struct PciState {
+    pub error_addr: u32,
+    pub error_flags: u32,
+    pub control: u32,
+    /// Latched configuration-space address:
+    /// `(bus << 16) | (devfn << 8) | (reg & 0xFC)`.
     pub cfg_addr: u32,
-    pub cfg_data: u32,
-    pub mem_base: u32,
-    pub mem_limit: u32,
-    pub io_base: u32,
-    pub io_limit: u32,
-    pub ctrl: u32,
-    pub status: u32,
-    pub int_ack: u32,
-    pub int_mask: u32,
-    pub arb_ctrl: u32,
-    pub arb_pri: u32,
-    pub err_addr: u32,
-    pub err_cmd: u32,
+    /// Functions indexed by devfn (0x00..0x20). Only the two onboard
+    /// AIC-7880 controllers are populated.
+    pub functions: [PciFunction; 32],
+}
+
+impl Default for PciState {
+    fn default() -> Self {
+        let mut funcs = [PciFunction::nc(); 32];
+        funcs[pci::DEV_SCSI0_DEVFN as usize] = PciFunction::aic7880(pci::IRQ_SCSI0 as u8);
+        funcs[pci::DEV_SCSI1_DEVFN as usize] = PciFunction::aic7880(pci::IRQ_SCSI1 as u8);
+        PciState {
+            error_addr: 0,
+            error_flags: 0,
+            control: 0,
+            cfg_addr: 0,
+            functions: funcs,
+        }
+    }
 }
 
 impl PciState {
-    pub fn read32(&self, offset: u32) -> u32 {
-        match offset {
-            pci::CFG_ADDR => self.cfg_addr,
-            pci::CFG_DATA => self.cfg_data,
-            pci::MEM_BASE => self.mem_base,
-            pci::MEM_LIMIT => self.mem_limit,
-            pci::IO_BASE => self.io_base,
-            pci::IO_LIMIT => self.io_limit,
-            pci::CTRL => self.ctrl,
-            pci::STATUS => self.status,
-            pci::INT_ACK => self.int_ack,
-            pci::INT_MASK => self.int_mask,
-            pci::ARB_CTRL => self.arb_ctrl,
-            pci::ARB_PRI => self.arb_pri,
-            pci::ERR_ADDR => self.err_addr,
-            pci::ERR_CMD => self.err_cmd,
+    /// Decode the latched cfg_addr into (devfn, dword register).
+    /// Only bus 0 exists; returns None for anything else.
+    fn cfg_target(&self) -> Option<(usize, u32)> {
+        let bus = (self.cfg_addr >> 16) & 0xFF;
+        let devfn = ((self.cfg_addr >> 8) & 0xFF) as usize;
+        let reg = self.cfg_addr & 0xFC;
+        if bus != 0 {
+            return None;
+        }
+        Some((devfn, reg))
+    }
+
+    /// Perform a config-space read and latch the result into CFG_DATA.
+    /// Missing devices read as all-ones (0xFFFFFFFF) and flag a master-abort
+    /// (the CPU bus error is masked by the kernel; see Linux `ops-mace.c`).
+    fn read_config(&mut self) -> u32 {
+        match self.cfg_target() {
+            None => {
+                self.error_flags |= pci::PERR_MASTER_ABORT;
+                0xFFFF_FFFF
+            }
+            Some((devfn, reg)) => match self.config_dword_for_target(devfn, reg) {
+                Some(v) => v,
+                None => {
+                    self.error_flags |= pci::PERR_MASTER_ABORT;
+                    0xFFFF_FFFF
+                }
+            },
+        }
+    }
+
+    /// Config dword for a present function, or None when the device is
+    /// absent (readers then return all-ones and flag a master-abort).
+    fn config_dword_for_target(&self, devfn: usize, reg: u32) -> Option<u32> {
+        let f = self.functions[devfn];
+        if !f.present {
+            return None;
+        }
+        // BAR0 size detection: the controller answers its alignment mask
+        // (256 bytes) when probed with an all-ones write.
+        if reg == 0x10 && f.config_dword(0x10) == 0xFFFF_FFFF {
+            return Some(0xFFFF_FF00);
+        }
+        Some(f.config_dword(reg))
+    }
+
+    /// Perform a config-space write (32-bit). Byte/word accesses arrive as
+    /// read-modify-write dwords from the big-endian lane steering in `Mace`.
+    fn write_config(&mut self, value: u32) {
+        let Some((devfn, reg)) = self.cfg_target() else {
+            return;
+        };
+        let f = &mut self.functions[devfn];
+        if !f.present {
+            return;
+        }
+        let bytes = value.to_le_bytes();
+        match reg {
+            // BAR0: remember the assigned memory base for PCI window decode.
+            0x10 => {
+                if value == 0xFFFF_FFFF {
+                    // Size-detection probe; the read-back delivers the mask.
+                    f.config[0x10..0x14].copy_from_slice(&bytes);
+                } else {
+                    let base = value & 0xFFFF_FF00;
+                    f.config[0x10..0x14].copy_from_slice(&base.to_le_bytes());
+                    let name = if devfn == pci::DEV_SCSI0_DEVFN as usize {
+                        "SCSI0"
+                    } else if devfn == pci::DEV_SCSI1_DEVFN as usize {
+                        "SCSI1"
+                    } else {
+                        "PCI"
+                    };
+                    log::debug!("MACE PCI: {name} (devfn {devfn:#04x}) BAR0 = {base:#010x}");
+                }
+            }
+            _ => {
+                let r = (reg & 0xFC) as usize;
+                f.config[r..r + 4].copy_from_slice(&bytes);
+            }
+        }
+    }
+
+    pub fn read32(&mut self, offset: u32) -> u32 {
+        match offset & !3 {
+            pci::ERROR_ADDR => self.error_addr,
+            pci::ERROR_FLAGS => self.error_flags,
+            pci::CONTROL => self.control,
+            pci::REV_INFO => 0, // silicon revision: not sourced, read as 0
+            pci::CONFIG_ADDR => self.cfg_addr,
+            pci::CONFIG_DATA => self.read_config(),
             _ => {
                 log::warn!("PCI read32: unimplemented offset 0x{:04X}", offset);
                 0
@@ -568,26 +843,54 @@ impl PciState {
         }
     }
 
+    pub fn read32_immutable(&self, offset: u32) -> u32 {
+        match offset & !3 {
+            pci::ERROR_ADDR => self.error_addr,
+            pci::ERROR_FLAGS => self.error_flags,
+            pci::CONTROL => self.control,
+            pci::REV_INFO => 0,
+            pci::CONFIG_ADDR => self.cfg_addr,
+            pci::CONFIG_DATA => match self.cfg_target() {
+                None => 0xFFFF_FFFF,
+                Some((devfn, reg)) => self
+                    .config_dword_for_target(devfn, reg)
+                    .unwrap_or(0xFFFF_FFFF),
+            },
+            _ => {
+                log::warn!("PCI read32_immutable: unimplemented offset 0x{:04X}", offset);
+                0
+            }
+        }
+    }
+
     pub fn write32(&mut self, offset: u32, value: u32) {
-        match offset {
-            pci::CFG_ADDR => self.cfg_addr = value,
-            pci::CFG_DATA => self.cfg_data = value,
-            pci::MEM_BASE => self.mem_base = value,
-            pci::MEM_LIMIT => self.mem_limit = value,
-            pci::IO_BASE => self.io_base = value,
-            pci::IO_LIMIT => self.io_limit = value,
-            pci::CTRL => self.ctrl = value,
-            pci::STATUS => self.status = value,
-            pci::INT_ACK => self.int_ack = value,
-            pci::INT_MASK => self.int_mask = value,
-            pci::ARB_CTRL => self.arb_ctrl = value,
-            pci::ARB_PRI => self.arb_pri = value,
-            pci::ERR_ADDR => self.err_addr = value,
-            pci::ERR_CMD => self.err_cmd = value,
+        match offset & !3 {
+            pci::ERROR_ADDR => self.error_addr = value,
+            // Writing the error flags clears them (CPU bus-error handler).
+            pci::ERROR_FLAGS => self.error_flags = 0,
+            pci::CONTROL => self.control = value,
+            pci::REV_INFO => {} // write = PCI flush, no storage
+            pci::CONFIG_ADDR => self.cfg_addr = value,
+            pci::CONFIG_DATA => self.write_config(value),
             _ => {
                 log::warn!("PCI write32: unimplemented offset 0x{:04X} = 0x{:08X}", offset, value);
             }
         }
+    }
+
+    /// Route a PCI memory-window access to the function claiming `addr`
+    /// through BAR0, masking to the controller's 256-byte window.
+    pub fn bar_target(&self, addr: u32) -> Option<(usize, u32)> {
+        (0..32)
+            .filter(|&i| self.functions[i].present)
+            .find_map(|i| {
+                let bar = self.functions[i].bar0();
+                if bar != 0 && (addr >= bar && addr < bar + 0x100) {
+                    Some((i, addr - bar))
+                } else {
+                    None
+                }
+            })
     }
 }
 
@@ -1874,6 +2177,7 @@ impl Io {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ip32;
 
     /// The O2 spaces 16550 byte registers at offset (reg << 8) within each
     /// UART window, so LSR (reg index 5) lives at uart1 + 0x500.
@@ -1992,5 +2296,116 @@ mod tests {
         u.write32(perif::ustmsc::UST_LO, 0xdead_beef);
         u.write32(perif::ustmsc::UST_HI, 0xcafe_1234);
         assert_eq!(u.ust, 0xdead_beef_cafe_1234);
+    }
+
+    /// Full config-space enumeration through the MACE byte lanes, exactly the
+    /// way Linux `ops-mace.c` reads it (`config_data.b[(reg & 3) ^ 3]`).
+    /// Each present function answers vendor 0x9004 / device 0x8078; absent
+    /// devices read all-ones and set the master-abort flag.
+    #[test]
+    fn pci_config_enumerates_aic7880_on_both_channels() {
+        use crate::memory::AddressSpace;
+        let mut mace = Mace::new();
+
+        for devfn in [pci::DEV_SCSI0_DEVFN as usize, pci::DEV_SCSI1_DEVFN as usize] {
+            // Address the device (bus 0): config_addr = devfn<<8 | reg&0xfc.
+            mace.pci.cfg_addr = (devfn as u32) << 8;
+            // Vendor id (reg 0/1): MIPS byte lane b[(reg&3)^3] = b[3], b[2].
+            assert_eq!(
+                mace.read8(pci::BASE + pci::CONFIG_DATA + 3),
+                0x04,
+                "vendor id low byte devfn {devfn:#04x}"
+            );
+            assert_eq!(mace.read8(pci::BASE + pci::CONFIG_DATA + 2), 0x90);
+            // Device id (reg 2/3): lane b[1], b[0].
+            assert_eq!(mace.read8(pci::BASE + pci::CONFIG_DATA + 1), 0x78);
+            assert_eq!(mace.read8(pci::BASE + pci::CONFIG_DATA + 0), 0x80);
+            // Full dword reveals 0x8078_9004 (little-endian PCI layout).
+            assert_eq!(
+                mace.read32(pci::BASE + pci::CONFIG_DATA),
+                0x8078_9004,
+                "device/vendor dword devfn {devfn:#04x}"
+            );
+            // Base class (reg 0x0B) == mass storage: dword at reg 0x08 == 0x0100_0000.
+            mace.pci.cfg_addr = ((devfn as u32) << 8) | 0x08;
+            assert_eq!(
+                mace.read32(pci::BASE + pci::CONFIG_DATA),
+                0x0100_0000
+            );
+            // One hardware IRQ line per controller: 8 (SCSI0) / 9 (SCSI1).
+            let want_irq = if devfn == pci::DEV_SCSI0_DEVFN as usize {
+                pci::IRQ_SCSI0 as u8
+            } else {
+                pci::IRQ_SCSI1 as u8
+            };
+            mace.pci.cfg_addr = (devfn as u32) << 8 | 0x3C;
+            assert_eq!(mace.read8(pci::BASE + pci::CONFIG_DATA + 3), want_irq);
+        }
+    }
+
+    /// Reading a non-existent device (expansion slot area, devfn 0x18) returns
+    /// all-ones and latches the master-abort error flag; writing the flags
+    /// register clears it (CPU bus-error handler).
+    #[test]
+    fn pci_config_absent_device_reads_all_ones_and_sets_master_abort() {
+        let mut mace = Mace::new();
+        mace.pci.cfg_addr = (pci::DEV_SLOT_DEVFN as u32) << 8;
+        assert_eq!(mace.read32(pci::BASE + pci::CONFIG_DATA), 0xFFFF_FFFF);
+        assert_ne!(mace.pci.error_flags & pci::PERR_MASTER_ABORT, 0);
+        mace.write32(pci::BASE + pci::ERROR_FLAGS, 0);
+        assert_eq!(mace.pci.error_flags, 0);
+    }
+
+    /// BAR0: size-detection (write all-ones, read back the 256-byte mask),
+    /// then assignment; the assigned base gets routed by the PCI memory
+    /// window to the corresponding onboard controller.
+    #[test]
+    fn pci_bar0_size_probe_and_window_route() {
+        let mut mace = Mace::new();
+
+        // Probe BAR0 of SCSI0 for its size.
+        mace.pci.cfg_addr = ((pci::DEV_SCSI0_DEVFN as u32) << 8) | 0x10;
+        mace.pci.write_config(0xFFFF_FFFF);
+        assert_eq!(mace.read32(pci::BASE + pci::CONFIG_DATA), 0xFFFF_FF00);
+
+        // Linux assigns the BAR within PCI_LOW_MEMORY (0x1a000000).
+        let bar = ip32::PHYS_PCI_MEM + 0x4000;
+        mace.pci.write_config(bar);
+        assert_eq!(mace.pci.functions[pci::DEV_SCSI0_DEVFN as usize].bar0(), bar);
+
+        // Window access at bar touches ahc0 (SEECTL at +0x1e, SEERDY always set).
+        assert_ne!(mace.pci_window_read8(bar + ahc::SEECTL) & ahc::SEECTL_SEERDY, 0);
+
+        // A second controller window (SCSI1 at a different BAR) is distinct
+        // and does not collide with the first.
+        let bar1 = ip32::PHYS_PCI_MEM + 0x8000;
+        mace.pci.cfg_addr = ((pci::DEV_SCSI1_DEVFN as u32) << 8) | 0x10;
+        mace.pci.write_config(bar1);
+        assert_ne!(mace.pci_window_read8(bar1 + ahc::SEECTL) & ahc::SEECTL_SEERDY, 0);
+        assert_ne!(
+            mace.pci.functions[pci::DEV_SCSI1_DEVFN as usize].bar0(),
+            bar
+        );
+    }
+
+    /// The reset handshake and a general-register byte write round-trip
+    /// through the PCI window (as `ahc_outb` does on the guest side).
+    #[test]
+    fn ahc_reset_and_reg_write_through_pci_window() {
+        let mut mace = Mace::new();
+        mace.pci.cfg_addr = ((pci::DEV_SCSI0_DEVFN as u32) << 8) | 0x10;
+        mace.pci.write_config(ip32::PHYS_PCI_MEM);
+        let bar = ip32::PHYS_PCI_MEM;
+
+        // Reset with pause; the driver waits for CHIPRSTACK to set.
+        mace.pci_window_write8(bar + ahc::HCNTRL, ahc::HCNTRL_CHIPRST | ahc::HCNTRL_PAUSE);
+        assert_ne!(mace.pci_window_read8(bar + ahc::HCNTRL) & ahc::HCNTRL_CHIPRSTACK, 0);
+        // Un-pause clears it.
+        mace.pci_window_write8(bar + ahc::HCNTRL, ahc::HCNTRL_PAUSE);
+        assert_eq!(mace.pci_window_read8(bar + ahc::HCNTRL) & ahc::HCNTRL_CHIPRSTACK, 0);
+
+        // General register storage survives the byte-lane round-trip.
+        mace.pci_window_write8(bar + ahc::SCBPTR, 0x2A);
+        assert_eq!(mace.pci_window_read8(bar + ahc::SCBPTR), 0x2A);
     }
 }

@@ -141,16 +141,15 @@ impl MemoryMap {
         }
 
         for y in 0..height {
-            // The RE addresses tiles in GL convention (origin at bottom,
-            // tiles delivered bottom-to-top); the GBE scans out top-down,
-            // so the framebuffer image is 180°-rotated in tile memory.
+            // The RE addresses the framebuffer in GL convention (origin at the
+            // bottom); the GBE scans out top-down, so tile rows are stored in
+            // reverse order — flip vertically only.
             let ym = height - 1 - y;
             let tile_y = ym / TILE_LINES;
             let line_in_tile = ym % TILE_LINES;
             for x in 0..width {
-                let xm = width - 1 - x;
-                let tile_x = xm / pixels_per_tile_row;
-                let px_in_tile = xm % pixels_per_tile_row;
+                let tile_x = x / pixels_per_tile_row;
+                let px_in_tile = x % pixels_per_tile_row;
 
                 let tile_index = tile_y * tiles_per_row + tile_x;
 
@@ -212,7 +211,56 @@ impl MemoryMap {
             }
         }
 
+        self.draw_cursor(out, width, height);
+
         width * height
+    }
+
+    /// Overlay the GBE hardware cursor when enabled (`crs_ctl & 1`, see
+    /// crm_tp.c `CrmTpBlankscreen`). The glyph is a 32x32, 3-color cursor:
+    /// 64 words × 16 packed 2bpp pixels, with `crs_glyph[2r]` and
+    /// `crs_glyph[2r+1]` the left and right 16 pixels of glyph row `r`
+    /// (GBE spec §2.10). `crm_cursor` (see crm_cursor.c) fills the top-left
+    /// 16×16 quadrant with the arrow; the remaining words are zero.
+    ///
+    /// Pixels within a word are LSB-first: bit pair `(2c, 2c+1)` is pixel
+    /// column `c`, and value 1 = `crs_cmap[0]`, 2 = `crs_cmap[1]`,
+    /// 3 = `crs_cmap[2]`. initCursor only programs cmap[0]=white and
+    /// cmap[1]=red (crm_init.c), and the arrow uses exactly values 1 and 2 —
+    /// a red body with a white outline. `crs_pos` is the glyph's upper-left
+    /// corner in screen (scanline) coordinates; `out` is in RE order
+    /// (row 0 = guest bottom scanline), so the overlay row must be
+    /// `height-1-(cy+row)` to appear at the correct guest scanline.
+    fn draw_cursor(&self, out: &mut [u8], width: usize, height: usize) {
+        if self.gbe.crs_enabled() && width > 0 && height > 0 {
+            let (cx, cy) = self.gbe.crs_position();
+            let cm = self.gbe.crs_cmap();
+            for (i, word) in self.gbe.crs_glyph().iter().enumerate() {
+                let row = (i / 2) as i64;
+                let x0 = ((i % 2) * 16) as i64;
+                let y = height as i64 - 1 - (cy as i64 + row);
+                if y < 0 || y >= height as i64 {
+                    continue;
+                }
+                for col in 0..16i64 {
+                    let x = cx as i64 + x0 + col;
+                    if x < 0 || x >= width as i64 {
+                        continue;
+                    }
+                    // LSB-first 2bpp: pixel col = bits (2c, 2c+1).
+                    let p = (word >> (2 * col as u32)) & 3;
+                    if p == 0 {
+                        continue;
+                    }
+                    let entry = cm[(p - 1) as usize];
+                    let o = (y as usize * width + x as usize) * 4;
+                    out[o] = (entry >> 24) as u8;
+                    out[o + 1] = (entry >> 16) as u8;
+                    out[o + 2] = (entry >> 8) as u8;
+                    out[o + 3] = 0xff;
+                }
+            }
+        }
     }
 
     /// Read a 32-bit word from the physical address space.
@@ -222,7 +270,21 @@ impl MemoryMap {
             a if a < ip32::PHYS_BASE_RENDER => self.crime_cpu.read32(a - ip32::PHYS_BASE_CRIME),
             a if a < ip32::PHYS_BASE_GBE => self.render_engine.read32(a - ip32::PHYS_BASE_RENDER),
             a if a < ip32::PHYS_BASE_ICE => self.gbe.read32(a - ip32::PHYS_BASE_GBE),
-            a if a < ip32::PHYS_BASE_MACE => self.ice.read32(a - ip32::PHYS_BASE_ICE),
+            a if a < ip32::PHYS_PCI_IO => self.ice.read32(a - ip32::PHYS_BASE_ICE),
+            // PCI low I/O window (0x18000000).
+            a if a < ip32::PHYS_PCI_IO + ip32::PHYS_SIZE_PCI_IO => self.mace.pci_window_read32(a),
+            a if a < ip32::PHYS_PCI_MEM => {
+                log::warn!("read32: unassigned physical hole at {:#010X}", a);
+                0xFFFF_FFFF
+            }
+            // PCI low memory window (0x1A000000..0x1BFFFFFF).
+            a if a < ip32::PHYS_PCI_MEM + ip32::PHYS_SIZE_PCI_MEM => {
+                self.mace.pci_window_read32(a)
+            }
+            a if a < ip32::PHYS_BASE_MACE => {
+                log::warn!("read32: unassigned physical hole at {:#010X}", a);
+                0xFFFF_FFFF
+            }
             a if a < ip32::PHYS_SYSTEM_ROM => self.mace.read32(a - ip32::PHYS_BASE_MACE),
             a => self.rom.read32(a - ip32::PHYS_SYSTEM_ROM),
         }
@@ -247,8 +309,22 @@ impl MemoryMap {
             a if a < ip32::PHYS_BASE_ICE => {
                 self.gbe.write32(a - ip32::PHYS_BASE_GBE, value)
             }
-            a if a < ip32::PHYS_BASE_MACE => {
+            a if a < ip32::PHYS_PCI_IO => {
                 self.ice.write32(a - ip32::PHYS_BASE_ICE, value)
+            }
+            // PCI low I/O window (0x18000000).
+            a if a < ip32::PHYS_PCI_IO + ip32::PHYS_SIZE_PCI_IO => {
+                self.mace.pci_window_write32(a, value)
+            }
+            a if a < ip32::PHYS_PCI_MEM => {
+                log::warn!("write32: unassigned physical hole at {:#010X}", a);
+            }
+            // PCI low memory window (0x1A000000..0x1BFFFFFF).
+            a if a < ip32::PHYS_PCI_MEM + ip32::PHYS_SIZE_PCI_MEM => {
+                self.mace.pci_window_write32(a, value)
+            }
+            a if a < ip32::PHYS_BASE_MACE => {
+                log::warn!("write32: unassigned physical hole at {:#010X}", a);
             }
             a if a < ip32::PHYS_SYSTEM_ROM => {
                 self.mace.write32(a - ip32::PHYS_BASE_MACE, value)
@@ -264,7 +340,13 @@ impl MemoryMap {
             a if a < ip32::PHYS_BASE_RENDER => self.crime_cpu.read16(a - ip32::PHYS_BASE_CRIME),
             a if a < ip32::PHYS_BASE_GBE => self.render_engine.read16(a - ip32::PHYS_BASE_RENDER),
             a if a < ip32::PHYS_BASE_ICE => self.gbe.read16(a - ip32::PHYS_BASE_GBE),
-            a if a < ip32::PHYS_BASE_MACE => self.ice.read16(a - ip32::PHYS_BASE_ICE),
+            a if a < ip32::PHYS_PCI_IO => self.ice.read16(a - ip32::PHYS_BASE_ICE),
+            a if a < ip32::PHYS_PCI_IO + ip32::PHYS_SIZE_PCI_IO => self.mace.pci_window_read16(a),
+            a if a < ip32::PHYS_PCI_MEM => 0xFFFF,
+            a if a < ip32::PHYS_PCI_MEM + ip32::PHYS_SIZE_PCI_MEM => {
+                self.mace.pci_window_read16(a)
+            }
+            a if a < ip32::PHYS_BASE_MACE => 0xFFFF,
             a if a < ip32::PHYS_SYSTEM_ROM => self.mace.read16(a - ip32::PHYS_BASE_MACE),
             a => self.rom.read16(a - ip32::PHYS_SYSTEM_ROM),
         }
@@ -283,9 +365,17 @@ impl MemoryMap {
             a if a < ip32::PHYS_BASE_ICE => {
                 self.gbe.write16(a - ip32::PHYS_BASE_GBE, value)
             }
-            a if a < ip32::PHYS_BASE_MACE => {
+            a if a < ip32::PHYS_PCI_IO => {
                 self.ice.write16(a - ip32::PHYS_BASE_ICE, value)
             }
+            a if a < ip32::PHYS_PCI_IO + ip32::PHYS_SIZE_PCI_IO => {
+                self.mace.pci_window_write16(a, value)
+            }
+            a if a < ip32::PHYS_PCI_MEM => {}
+            a if a < ip32::PHYS_PCI_MEM + ip32::PHYS_SIZE_PCI_MEM => {
+                self.mace.pci_window_write16(a, value)
+            }
+            a if a < ip32::PHYS_BASE_MACE => {}
             a if a < ip32::PHYS_SYSTEM_ROM => {
                 self.mace.write16(a - ip32::PHYS_BASE_MACE, value)
             }
@@ -300,7 +390,11 @@ impl MemoryMap {
             a if a < ip32::PHYS_BASE_RENDER => self.crime_cpu.read8(a - ip32::PHYS_BASE_CRIME),
             a if a < ip32::PHYS_BASE_GBE => self.render_engine.read8(a - ip32::PHYS_BASE_RENDER),
             a if a < ip32::PHYS_BASE_ICE => self.gbe.read8(a - ip32::PHYS_BASE_GBE),
-            a if a < ip32::PHYS_BASE_MACE => self.ice.read8(a - ip32::PHYS_BASE_ICE),
+            a if a < ip32::PHYS_PCI_IO => self.ice.read8(a - ip32::PHYS_BASE_ICE),
+            a if a < ip32::PHYS_PCI_IO + ip32::PHYS_SIZE_PCI_IO => self.mace.pci_window_read8(a),
+            a if a < ip32::PHYS_PCI_MEM => 0xFF,
+            a if a < ip32::PHYS_PCI_MEM + ip32::PHYS_SIZE_PCI_MEM => self.mace.pci_window_read8(a),
+            a if a < ip32::PHYS_BASE_MACE => 0xFF,
             a if a < ip32::PHYS_SYSTEM_ROM => self.mace.read8(a - ip32::PHYS_BASE_MACE),
             a => self.rom.read8(a - ip32::PHYS_SYSTEM_ROM),
         }
@@ -319,9 +413,17 @@ impl MemoryMap {
             a if a < ip32::PHYS_BASE_ICE => {
                 self.gbe.write8(a - ip32::PHYS_BASE_GBE, value)
             }
-            a if a < ip32::PHYS_BASE_MACE => {
+            a if a < ip32::PHYS_PCI_IO => {
                 self.ice.write8(a - ip32::PHYS_BASE_ICE, value)
             }
+            a if a < ip32::PHYS_PCI_IO + ip32::PHYS_SIZE_PCI_IO => {
+                self.mace.pci_window_write8(a, value)
+            }
+            a if a < ip32::PHYS_PCI_MEM => {}
+            a if a < ip32::PHYS_PCI_MEM + ip32::PHYS_SIZE_PCI_MEM => {
+                self.mace.pci_window_write8(a, value)
+            }
+            a if a < ip32::PHYS_BASE_MACE => {}
             a if a < ip32::PHYS_SYSTEM_ROM => {
                 self.mace.write8(a - ip32::PHYS_BASE_MACE, value)
             }
@@ -336,7 +438,17 @@ impl MemoryMap {
             a if a < ip32::PHYS_BASE_RENDER => self.crime_cpu.read64(a - ip32::PHYS_BASE_CRIME),
             a if a < ip32::PHYS_BASE_GBE => self.render_engine.read64(a - ip32::PHYS_BASE_RENDER),
             a if a < ip32::PHYS_BASE_ICE => self.gbe.read64(a - ip32::PHYS_BASE_GBE),
-            a if a < ip32::PHYS_BASE_MACE => self.ice.read64(a - ip32::PHYS_BASE_ICE),
+            a if a < ip32::PHYS_PCI_IO => self.ice.read64(a - ip32::PHYS_BASE_ICE),
+            a if a < ip32::PHYS_PCI_IO + ip32::PHYS_SIZE_PCI_IO => {
+                ((self.mace.pci_window_read32(a) as u64) << 32)
+                    | self.mace.pci_window_read32(a + 4) as u64
+            }
+            a if a < ip32::PHYS_PCI_MEM => 0xFFFF_FFFF_FFFF_FFFF,
+            a if a < ip32::PHYS_PCI_MEM + ip32::PHYS_SIZE_PCI_MEM => {
+                ((self.mace.pci_window_read32(a) as u64) << 32)
+                    | self.mace.pci_window_read32(a + 4) as u64
+            }
+            a if a < ip32::PHYS_BASE_MACE => 0xFFFF_FFFF_FFFF_FFFF,
             a if a < ip32::PHYS_SYSTEM_ROM => self.mace.read64(a - ip32::PHYS_BASE_MACE),
             a => self.rom.read64(a - ip32::PHYS_SYSTEM_ROM),
         }
@@ -359,9 +471,19 @@ impl MemoryMap {
             a if a < ip32::PHYS_BASE_ICE => {
                 self.gbe.write64(a - ip32::PHYS_BASE_GBE, value)
             }
-            a if a < ip32::PHYS_BASE_MACE => {
+            a if a < ip32::PHYS_PCI_IO => {
                 self.ice.write64(a - ip32::PHYS_BASE_ICE, value)
             }
+            a if a < ip32::PHYS_PCI_IO + ip32::PHYS_SIZE_PCI_IO => {
+                self.mace.pci_window_write32(a, (value >> 32) as u32);
+                self.mace.pci_window_write32(a + 4, value as u32);
+            }
+            a if a < ip32::PHYS_PCI_MEM => {}
+            a if a < ip32::PHYS_PCI_MEM + ip32::PHYS_SIZE_PCI_MEM => {
+                self.mace.pci_window_write32(a, (value >> 32) as u32);
+                self.mace.pci_window_write32(a + 4, value as u32);
+            }
+            a if a < ip32::PHYS_BASE_MACE => {}
             a if a < ip32::PHYS_SYSTEM_ROM => {
                 self.mace.write64(a - ip32::PHYS_BASE_MACE, value)
             }

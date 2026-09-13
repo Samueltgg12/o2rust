@@ -26,20 +26,57 @@ MACE sub-blocks (from the decompiled PROM `definitions.h`):
 
 ## PCI bus
 
-- 64-bit, provided by MACE
-- Single expansion slot
-- PCI devices (from `fixup-ip32.c`):
-  - aic7xxx SCSI controller (2 devices: SCSI0, SCSI1)
-  - Expansion slot
-  - N/C, N/C
-- IRQ routing: SCSI0/SCSI1/SLOT0-2/SHARED0-2
+- 64-bit, provided by MACE. Host-bridge registers base: MACE + `0x080000`.
+- PCI Host Bridge register map (IRIX PROM `stand/arcs/IP32prom/include/mace.h`):
+
+| Offset | Register |
+|---|---|
+| `0x000` | `PCI_ERROR_ADDR` |
+| `0x004` | `PCI_ERROR_FLAGS` (write clears) |
+| `0x008` | `PCI_CONTROL` |
+| `0x00C` | `PCI_REV_INFO_R` (read) / `PCI_FLUSH_W` (write) |
+| `0xCF8` | `PCI_CONFIG_ADDR` |
+| `0xCFC` | `PCI_CONFIG_DATA` |
+
+- Config address encoding: `(peer<<24)|(bus<<16)|(dev<<11)|(func<<8)|(reg<<2)` —
+  same as Linux `devfn<<8 | (reg & 0xfc)`. Byte/word lane steering follows
+  Linux `arch/mips/pci/ops-mace.c`: `b[(reg & 3) ^ 3]`, `w[((reg >> 1) & 1) ^ 1]`.
+- PCI devices (bus 0, from `fixup-ip32.c`):
+
+| devfn | Device |
+|---|---|
+| `0x08` (dev 1) | SCSI0 — AIC-7880, IRQ 8 |
+| `0x10` (dev 2) | SCSI1 — AIC-7880, IRQ 9 |
+| `0x18` (dev 3) | Expansion slot (absent) |
+| `0x00`/`0x20` (dev 0/4) | N/C |
+
+- AIC-7880 PCI IDs: vendor `0x9004`, device `0x8078` (Linux
+  `drivers/scsi/aic7xxx/aic7xxx_pci.h`); class = mass storage/SCSI, 256-byte
+  memory BAR0 (`0xFFFFFF00` mask). Absent devices read all-ones and set
+  `PCI_ERROR_FLAGS` master-abort.
+- PCI address windows (IRIX `mace.h`): `PCI_LOW_MEMORY` = `0x1a000000`
+  (32 MB, the onboard SCSI BARs), `PCI_LOW_IO` = `0x18000000`. The base
+  physical map decodes these separately from the ICE/VICE window
+  (`0x17000000` + 64 KiB registers).
 
 ## SCSI
 
 - UltraWide SCSI
-- Adaptec AIC-7880 controller
-- R5000/RM7000 units: 2 drive sleds
-- R10000/R12000 units: 1 drive sled
+- Adaptec AIC-7880 controller (onboard, one per channel, PCI dev 1/2)
+- R5000/RM7000 units: 2 drive sleds; R10000/R12000 units: 1 drive sled
+- Register block and bit definitions from Linux `aic7xxx.reg` /
+  `aic7xxx_reg.h_shipped`. Key registers: SCSIID `0x05`, SELID `0x19`,
+  SEECTL `0x1e` (SEERDY `0x10`), SBLKCTL `0x1f`, SCSICONF `0x5a`,
+  SEQCTL `0x60` (LOADRAM `0x01`), SEQRAM `0x61`, SEQADDR0/1 `0x62/0x63`,
+  HCNTRL `0x87` (POWRDN/SWINT/IRQMS/PAUSE/INTEN/CHIPRST), HADDR `0x88`,
+  HCNT `0x8c`, SCBPTR `0x90`, INTSTAT `0x91`, CLRINT `0x92`, DFCNTRL `0x93`,
+  DFSTATUS `0x94`, SCBCNT `0x9a`, QINFIFO `0x9b`.
+- SEQRAM download protocol (aic7xxx.reg, p. 3-34): set SEQADDR0/1, then write
+  four bytes in succession; the address auto-increments after the most
+  significant byte.
+- Both Linux aic7xxx and IRIX `adp78.c` drive the chip through the on-chip
+  sequencer (microcode downloaded to SEQRAM; no PIO-only path). The sequencer
+  interpreter is the major remaining piece after the PCI/register foundation.
 
 ## ISA bus
 

@@ -1441,6 +1441,28 @@ impl GbeDisplayEngine {
         self.frm_control & 0xFFFF_FE00
     }
 
+    /// Whether the hardware cursor plane is enabled (`CRS_CTL` bit 0).
+    pub fn crs_enabled(&self) -> bool {
+        self.crs_ctl & 1 != 0
+    }
+
+    /// Cursor position (pixels) as written by the GUI: X in bits 11:0, Y in
+    /// bits 31:16 of `CRS_POS` (see `CrmTpMovec` in crm_tp.c). The cursor is
+    /// emitted in scanline space, so no GL (vertical) flip is applied.
+    pub fn crs_position(&self) -> (u32, u32) {
+        (self.crs_pos & 0xf_fff, (self.crs_pos >> 16) & 0xf_fff)
+    }
+
+    /// Cursor color map entries (`CRS_CMAP[0..3]`, packed `0xRRGGBB00`).
+    pub fn crs_cmap(&self) -> &[u32; 3] {
+        &self.crs_cmap
+    }
+
+    /// Cursor glyph words (`CRS_GLYPH[0..64]`, rows of 16 2bpp pixels).
+    pub fn crs_glyph(&self) -> &[u32; 64] {
+        &self.crs_glyph
+    }
+
     /// Advance the display scan-out by `delta` CRIME ticks (nominally one
     /// ~133 MHz tick per CPU cycle; close enough to the pixel clock for the
     /// PROM's `waitForBlanking`, which just needs `vt_xy` to move). Once

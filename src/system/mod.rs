@@ -6,7 +6,7 @@
 pub mod bus;
 
 use crate::cpu::{CpuModel, R5000};
-use crate::io::scsi::{ScsiBus, SCSI_TARGET_CDROM, SCSI_TARGET_DISK};
+use crate::io::scsi::{SCSI_TARGET_CDROM, SCSI_TARGET_DISK};
 use crate::memory::{DCache, MemoryMap};
 use crate::prom::Prom;
 use crate::storage::BlockDevice;
@@ -26,8 +26,6 @@ pub struct Emulator {
     pub prom: Option<Prom>,
     /// The CPU model being emulated.
     pub model: CpuModel,
-    /// The SCSI bus (hard disk on target 1, CD-ROM on target 6).
-    pub scsi: ScsiBus,
     /// Whether the emulator is running.
     running: bool,
 }
@@ -76,7 +74,6 @@ impl Emulator {
             cache: DCache::new(),
             prom: None,
             model: CpuModel::R5000,
-            scsi: ScsiBus::new(),
             running: false,
         }
     }
@@ -96,7 +93,6 @@ impl Emulator {
             cache: DCache::new(),
             prom: None,
             model: CpuModel::R5000,
-            scsi: ScsiBus::new(),
             running: false,
         }
     }
@@ -335,18 +331,23 @@ impl Emulator {
 
     // === SCSI storage ===
 
-    /// Mount a device as the internal **hard disk** (SCSI target 1).
+    /// Mount a device as the internal **hard disk**: SCSI0 (ahc0), target 1.
     pub fn mount_hard_disk(&mut self, device: Box<dyn BlockDevice>) -> anyhow::Result<()> {
-        self.mount_scsi(SCSI_TARGET_DISK, device, "hard disk")
+        Self::mount_scsi(&mut self.memory.mace.ahc0.bus, "SCSI0", SCSI_TARGET_DISK, device, "hard disk")?;
+        self.scsi_unimplemented_trace();
+        Ok(())
     }
 
-    /// Mount a device as the internal **CD-ROM** (SCSI target 6).
+    /// Mount a device as the internal **CD-ROM**: SCSI1 (ahc1), target 6.
     pub fn mount_cdrom(&mut self, device: Box<dyn BlockDevice>) -> anyhow::Result<()> {
-        self.mount_scsi(SCSI_TARGET_CDROM, device, "CD-ROM")
+        Self::mount_scsi(&mut self.memory.mace.ahc1.bus, "SCSI1", SCSI_TARGET_CDROM, device, "CD-ROM")?;
+        self.scsi_unimplemented_trace();
+        Ok(())
     }
 
     fn mount_scsi(
-        &mut self,
+        bus: &mut crate::io::scsi::ScsiBus,
+        controller: &str,
         target: u8,
         device: Box<dyn BlockDevice>,
         kind: &str,
@@ -354,31 +355,36 @@ impl Emulator {
         let name = device.name().to_string();
         let sector_count = device.sector_count();
         let sector_size = device.sector_size();
-        self.scsi.mount(target, device).map_err(|e| {
+        bus.mount(target, device).map_err(|e| {
             anyhow::anyhow!("failed to mount {kind} image: {e}")
         })?;
         log::info_msg(&format!(
-            "Mounted {kind} '{name}' on SCSI target {target} ({} bytes in {sector_count} sectors of {sector_size} B)",
+            "Mounted {kind} '{name}' on {controller} target {target} ({} bytes in {sector_count} sectors of {sector_size} B)",
             sector_count * u64::from(sector_size)
         ));
-        self.scsi_unimplemented_trace();
         Ok(())
     }
 
     fn scsi_unimplemented_trace(&self) {
-        log::debug_msg("SCSI register emulation (AIC-7880) is not yet wired; image mounted ready for future M3 work");
+        log::debug_msg("SCSI: attach registers, PCI config, and CDB target engine emulated; sequencer interpreter + DMA engine pending");
     }
 
-    /// The name of the attached hard disk, if any.
+    /// The name of the attached hard disk, if any (SCSI0 target 1).
     pub fn hard_disk_name(&self) -> Option<String> {
-        self.scsi
+        self.memory
+            .mace
+            .ahc0
+            .bus
             .device_info(SCSI_TARGET_DISK)
             .map(|info| info.name)
     }
 
-    /// The name of the attached CD-ROM, if any.
+    /// The name of the attached CD-ROM, if any (SCSI1 target 6).
     pub fn cdrom_name(&self) -> Option<String> {
-        self.scsi
+        self.memory
+            .mace
+            .ahc1
+            .bus
             .device_info(SCSI_TARGET_CDROM)
             .map(|info| info.name)
     }

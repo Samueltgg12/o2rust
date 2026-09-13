@@ -81,6 +81,14 @@ fn zz_dbg_gfx() {
     let fc = emu.memory.gbe.regs_dump().2;
     let Emulator { cache, memory, .. } = &mut emu;
     cache.flush_all(memory);
+    let g = &memory.gbe;
+    eprintln!(
+        "crs: enabled={} pos=({},{}) cmap={:08x?}",
+        g.crs_enabled(),
+        g.crs_position().0,
+        g.crs_position().1,
+        g.crs_cmap()
+    );
     let tl = (fc & 0xFFFF_FE00) as usize;
     eprintln!("tile-list bytes at {tl:#x}:");
     let mut nz = 0usize;
@@ -108,6 +116,40 @@ fn zz_dbg_gfx() {
         }
         std::fs::write("/tmp/o2_screen.ppm", &ppm).unwrap();
         eprintln!("wrote /tmp/o2_screen.ppm ({w}x{h})");
+
+        // ASCII luminance map: ~160 x ~40 chars.
+        let (ac, ar) = (160usize, 40usize);
+        eprintln!("ascii map ({ac}x{ar}):");
+        for ry in 0..ar {
+            let y0 = (ry * h as usize) / ar;
+            let y1 = ((ry + 1) * h as usize) / ar;
+            let mut line = String::new();
+            for rx in 0..ac {
+                let x0 = (rx * w as usize) / ac;
+                let x1 = ((rx + 1) * w as usize) / ac;
+                let mut sum = 0u32;
+                let mut cnt = 0u32;
+                for y in y0..y1.max(y0 + 1) {
+                    for x in x0..x1.max(x0 + 1) {
+                        let o = (y * w as usize + x) * 4;
+                        let (r, g, b) = (buf[o] as u32, buf[o + 1] as u32, buf[o + 2] as u32);
+                        sum += (r * 3 + g * 6 + b) / 10;
+                        cnt += 1;
+                    }
+                }
+                let a = if cnt == 0 { 0 } else { (sum / cnt) as u8 };
+                line.push(if a > 150 {
+                    '#'
+                } else if a > 70 {
+                    'O'
+                } else if a > 20 {
+                    'o'
+                } else {
+                    '.'
+                });
+            }
+            eprintln!("{line}");
+        }
     }
 
     eprintln!("--- console tail ---\n{}", &out[out.len().saturating_sub(900)..]);

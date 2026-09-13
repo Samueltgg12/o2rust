@@ -61,6 +61,16 @@ pub mod ip32 {
     pub const PHYS_BASE_GBE: u32 = 0x1600_0000;
     /// ICE (VICE) image compression engine base.
     pub const PHYS_BASE_ICE: u32 = 0x1700_0000;
+    /// ICE (VICE) register window size (registers end at 0x2fc).
+    pub const PHYS_SIZE_ICE: u32 = 0x0001_0000;
+    /// Low PCI I/O window (IRIX PROM `mace.h` `PCI_LOW_IO`). 64 KiB decode
+    /// window for PCI I/O-space resources (e.g. the expansion slot).
+    pub const PHYS_PCI_IO: u32 = 0x1800_0000;
+    pub const PHYS_SIZE_PCI_IO: u32 = 0x0001_0000;
+    /// Low PCI memory window (IRIX PROM `mace.h` `PCI_LOW_MEMORY`). 32 MB of
+    /// PCI memory space (the onboard AIC-7880 SCSI BARs live here).
+    pub const PHYS_PCI_MEM: u32 = 0x1a00_0000;
+    pub const PHYS_SIZE_PCI_MEM: u32 = 0x0200_0000;
     /// MACE (I/O engine) base.
     pub const PHYS_BASE_MACE: u32 = 0x1f00_0000;
     /// System ROM / PROM base (KSEG1 view).

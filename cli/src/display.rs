@@ -19,10 +19,10 @@ use o2rust::system::Emulator;
 use raw_window_handle::HasWindowHandle;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, KeyEvent, WindowEvent};
+use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::PhysicalKey;
-use winit::window::{Window, WindowId};
+use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::window::{CursorGrabMode, Window, WindowId};
 
 use crate::audio::AudioOut;
 use crate::input::{key_to_scan_bytes, HostInput};
@@ -111,6 +111,8 @@ pub fn run(emulator: Emulator, audio: Option<AudioOut>) -> Result<()> {
         input: HostInput::default(),
         fb_buffer: Vec::new(),
         last_cursor: None,
+        grabbed: false,
+        grab_mode: None,
     };
 
     event_loop.run_app(&mut app).context("event loop failed")?;
@@ -129,6 +131,11 @@ struct WinApp {
     input: HostInput,
     fb_buffer: Vec<u8>,
     last_cursor: Option<winit::dpi::PhysicalPosition<f64>>,
+    /// Whether input is grabbed (pointer locked + hidden). Click to acquire,
+    /// Right-Control to release. `grab_mode` records which grab succeeded so
+    /// release restores `None` for the same mode.
+    grabbed: bool,
+    grab_mode: Option<CursorGrabMode>,
 }
 
 impl ApplicationHandler for WinApp {
@@ -152,6 +159,10 @@ impl ApplicationHandler for WinApp {
                 self.redraw(&self.window.inner_size());
             }
             WindowEvent::CursorMoved { position, .. } => {
+                if !self.grabbed {
+                    self.last_cursor = None;
+                    return;
+                }
                 let dx = self
                     .last_cursor
                     .map(|last| position.x - last.x)
@@ -169,6 +180,14 @@ impl ApplicationHandler for WinApp {
                 self.last_cursor = None;
             }
             WindowEvent::MouseInput { state, button, .. } => {
+                if !self.grabbed {
+                    // Grab on any click; the acquisition click is not sent to
+                    // the guest (it's a host interaction).
+                    if state == ElementState::Pressed && button == MouseButton::Left {
+                        self.acquire_grab();
+                    }
+                    return;
+                }
                 if self.input.mouse.set_button(button, state == ElementState::Pressed) {
                     if let Some(pkt) = self.input.mouse.feed_motion(0.0, 0.0) {
                         self.emulator.push_ms_packet(pkt);
@@ -176,11 +195,14 @@ impl ApplicationHandler for WinApp {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                self.key_event(event);
+                if self.grabbed {
+                    self.key_event(event);
+                }
             }
             WindowEvent::Focused(false) => {
                 self.emulator.flush_input();
                 self.last_cursor = None;
+                self.release_grab();
             }
             _ => {}
         }
@@ -193,11 +215,57 @@ impl ApplicationHandler for WinApp {
 }
 
 impl WinApp {
+    /// Lock the pointer inside the window and capture keyboard; press
+    /// Right-Control to release. Uses `Locked` where supported and falls back
+    /// to `Confined` so the pointer can never leave the window; the cursor is
+    /// hidden only when a grab actually succeeded.
+    fn acquire_grab(&mut self) {
+        if self.grabbed {
+            return;
+        }
+        let mode = match self.window.set_cursor_grab(CursorGrabMode::Locked) {
+            Ok(()) => CursorGrabMode::Locked,
+            Err(_) => match self.window.set_cursor_grab(CursorGrabMode::Confined) {
+                Ok(()) => CursorGrabMode::Confined,
+                Err(e) => {
+                    tracing::error!("could not grab the pointer: {e:?}");
+                    return;
+                }
+            },
+        };
+        self.grab_mode = Some(mode);
+        self.window.set_cursor_visible(false);
+        self.grabbed = true;
+        self.last_cursor = None;
+        self.window.focus_window();
+        tracing::info!("input grabbed ({mode:?}) — Right-Control to release");
+    }
+
+    /// Drop the pointer grab and show the host cursor again.
+    fn release_grab(&mut self) {
+        if !self.grabbed {
+            return;
+        }
+        if self.grab_mode.take().is_some() {
+            let _ = self.window.set_cursor_grab(CursorGrabMode::None);
+        }
+        self.window.set_cursor_visible(true);
+        self.grabbed = false;
+        self.last_cursor = None;
+        tracing::info!("input released — click the window to grab again");
+    }
+
     fn key_event(&mut self, event: KeyEvent) {
         let code = match event.physical_key {
             PhysicalKey::Code(code) => code,
             _ => return,
         };
+        // Right-Control releases the grab (and is not forwarded to the guest).
+        if code == KeyCode::ControlRight && event.state == ElementState::Pressed {
+            self.release_grab();
+            self.emulator.flush_input();
+            return;
+        }
         // PS/2 autorepeat: send make again for presses, break on release.
         let mut bytes = Vec::with_capacity(4);
         key_to_scan_bytes(code, event.state == ElementState::Pressed, &mut bytes);
@@ -223,6 +291,17 @@ impl WinApp {
         } else {
             None
         };
+
+        // Debug: dump the CPU-rendered framebuffer for comparison with the
+        // GL window output (helps isolate renderer vs. upload bugs).
+        if std::env::var("O2_DUMP_PPM").is_ok() && pixels > 0 && data.is_some() {
+            let dump = data.unwrap();
+            let mut ppm = format!("P6\n{fb_w} {fb_h}\n255\n").into_bytes();
+            for px in dump.chunks(4) {
+                ppm.extend_from_slice(&px[..3]);
+            }
+            let _ = std::fs::write("/tmp/cli_cpu.ppm", &ppm);
+        }
 
         self.renderer.render(
             data,
@@ -367,7 +446,10 @@ impl GlRenderer {
                 );
             }
 
-            // Letterbox quad so the video aspect is preserved.
+            // Letterbox quad so the video aspect is preserved. `out` is in RE
+            // order (row 0 = guest bottom scanline) and v=0 is the bottom of
+            // the quad, so texture row 0 lands at the bottom of the window and
+            // the guest is displayed upright.
             let (sx, sy) = letterbox_scale(fb_w, fb_h, win_w, win_h);
             let verts: [f32; 16] = [
                 -sx, -sy, 0.0, 0.0,
@@ -384,7 +466,10 @@ impl GlRenderer {
 
             gl.use_program(Some(self.program));
             gl.bind_vertex_array(Some(self.vao));
-            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            // TRIANGLE_FAN (not STRIP): with a 4-vertex strip llvmpipe renders
+            // the quad as a fan whose middle vertex lands at the window center,
+            // leaving a triangular black wedge at the left of the screen.
+            gl.draw_arrays(glow::TRIANGLE_FAN, 0, 4);
             gl.bind_vertex_array(None);
             gl.use_program(None);
         }
