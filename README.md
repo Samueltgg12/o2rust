@@ -39,7 +39,7 @@ This project is developed in three phases. See
 
 - **Phase 1 — Research ✅ complete:** exhaustive, well-sourced hardware
   documentation under [`docs/`](docs/). All register maps sourced.
-- **Phase 2 — Emulation (current):** a full-fledged C++ emulator, as accurate
+- **Phase 2 — Emulation (current):** a full-fledged Rust emulator, as accurate
   to the hardware as the documentation and specs allow. CPU, memory, graphics,
   I/O, and the PROM firmware, with a GUI.
 - **Phase 3 — Performance & polish (After Phase 2):** JIT compilation, optimizations,
