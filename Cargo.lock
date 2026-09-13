@@ -2692,6 +2692,7 @@ dependencies = [
  "glow",
  "glutin",
  "glutin-winit",
+ "libc",
  "libchdman-rs",
  "o2rust",
  "raw-window-handle",

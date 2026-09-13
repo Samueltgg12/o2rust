@@ -18,27 +18,32 @@ fn observe_prom_boot_warm_gda_stub() {
     let chunk = 200_000u64;
     let mut step = 0u64;
     let mut saw_monitor_prompt = false;
-
-    // Phase A: cold boot through POST into OSLOAD's scan-link monitor, which
-    // blocks waiting for a keypress (real headless O2 behavior).
     let mut acc = Vec::new();
+
+    // Phase A: cold boot through POST1, which must validate the firmware
+    // segment checksum, copy the firmware to RAM and jump into it at its
+    // VMA (0x81000000). (The serial loader's scan-link monitor is the
+    // *fallback* path — reaching it means post1 rejected the firmware.)
     for _ in 0..(4_000_000_000u64 / chunk) {
         let pc = emu.pc();
         if pc == 0xbfc003a0 {
-            eprintln!("[{step}] dead_loop hit");
+            eprintln!("[{step}] dead_loop hit (firmware crashed before phase A completed)");
             break;
         }
         acc.extend(emu.drain_console_output());
-        if acc.windows(13).any(|w| w == b"\n\rSL-9600-8E>") {
+        if (0x8100_0000..0x8110_0000).contains(&pc) {
             saw_monitor_prompt = true;
-            eprintln!("[{step}] scan-link monitor prompt printed, pc=0x{pc:08x}");
+            eprintln!("[{step}] post1 jumped into firmware, pc=0x{pc:08x}");
             break;
         }
         emu.run(chunk);
         step += chunk;
     }
-    eprintln!("phase A end: prompt={saw_monitor_prompt} acc={:?}", String::from_utf8_lossy(&acc));
-    assert!(saw_monitor_prompt, "PROM must reach the scan-link monitor");
+    eprintln!("phase A end: fw={saw_monitor_prompt} acc={:?}", String::from_utf8_lossy(&acc));
+    assert!(
+        saw_monitor_prompt,
+        "post1 must validate the firmware checksum and jump to it at 0x81000000 (fell back to sloader instead)"
+    );
 
     // Phase B: the boot service (host) primes the GDA + stub, then simulates
     // the reset button — the CRIME chip latches its soft-reset flag, which the

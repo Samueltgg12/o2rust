@@ -18,9 +18,11 @@ pub fn init() {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("o2rust=info,o2rust_cli=info,o2rust_gui=info"));
 
+    // Logs go to stderr: in the CLI, stdout is the emulated machine's serial
+    // console (the PROM's UART1), so diagnostics must never pollute it.
     tracing_subscriber::registry()
         .with(filter)
-        .with(fmt::layer().with_target(true))
+        .with(fmt::layer().with_target(true).with_writer(std::io::stderr))
         .init();
 }
 

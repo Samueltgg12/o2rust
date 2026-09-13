@@ -144,8 +144,12 @@ impl MemoryMap {
             let tile_y = y / TILE_LINES;
             let line_in_tile = y % TILE_LINES;
             for x in 0..width {
-                let tile_x = x / pixels_per_tile_row;
-                let px_in_tile = x % pixels_per_tile_row;
+                // The tile memory is laid out right-to-left across the
+                // screen (the RE delivers framebuffer stores in the opposite
+                // X direction from the GBE's scan-out).
+                let xm = width - 1 - x;
+                let tile_x = xm / pixels_per_tile_row;
+                let px_in_tile = xm % pixels_per_tile_row;
 
                 let tile_index = tile_y * tiles_per_row + tile_x;
 
@@ -231,7 +235,13 @@ impl MemoryMap {
                 self.crime_cpu.write32(a - ip32::PHYS_BASE_CRIME, value)
             }
             a if a < ip32::PHYS_BASE_GBE => {
-                self.render_engine.write32(a - ip32::PHYS_BASE_RENDER, value)
+                let off = a - ip32::PHYS_BASE_RENDER;
+                self.render_engine.write32(off, value);
+                // "Go" register write: execute the pending MRE primitive
+                // into the framebuffer (see graphics::RenderEngine::rasterize).
+                if off == crate::graphics::RenderEngine::GO_OFFSET {
+                    self.render_engine.rasterize(&self.gbe, &mut self.ram);
+                }
             }
             a if a < ip32::PHYS_BASE_ICE => {
                 self.gbe.write32(a - ip32::PHYS_BASE_GBE, value)
@@ -339,7 +349,11 @@ impl MemoryMap {
                 self.crime_cpu.write64(a - ip32::PHYS_BASE_CRIME, value)
             }
             a if a < ip32::PHYS_BASE_GBE => {
-                self.render_engine.write64(a - ip32::PHYS_BASE_RENDER, value)
+                let off = a - ip32::PHYS_BASE_RENDER;
+                self.render_engine.write64(off, value);
+                if off == crate::graphics::RenderEngine::GO_OFFSET {
+                    self.render_engine.rasterize(&self.gbe, &mut self.ram);
+                }
             }
             a if a < ip32::PHYS_BASE_ICE => {
                 self.gbe.write64(a - ip32::PHYS_BASE_GBE, value)

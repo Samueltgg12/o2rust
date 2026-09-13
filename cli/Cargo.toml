@@ -24,3 +24,4 @@ rtrb.workspace = true
 rfd.workspace = true
 libchdman-rs.workspace = true
 glow = "0.16"
+libc.workspace = true

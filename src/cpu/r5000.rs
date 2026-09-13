@@ -115,6 +115,11 @@ impl R5000 {
         log::info_msg(&format!("R5000 soft reset (warm boot), PC = 0x{reset_vector:08x}"));
     }
 
+    /// Whether the CPU has been asked to stop (via [`R5000::stop`]).
+    pub fn is_stopped(&self) -> bool {
+        self.stop_requested
+    }
+
     /// The number of cycles executed so far.
     pub fn cycles(&self) -> u64 {
         self.cycles

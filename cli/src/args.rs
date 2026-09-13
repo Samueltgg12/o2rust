@@ -48,6 +48,11 @@ pub struct Args {
 }
 
 impl Args {
+    /// Whether the user left `--log-filter` at its default value.
+    pub fn log_filter_is_default(&self) -> bool {
+        self.log_filter == "o2rust=info,o2rust_cli=info"
+    }
+
     /// The effective log filter, honouring `--verbose`.
     pub fn effective_log_filter(&self) -> String {
         if self.verbose {

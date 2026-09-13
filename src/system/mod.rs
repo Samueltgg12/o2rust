@@ -108,6 +108,30 @@ impl Emulator {
         Self::with_ram(ram_mb, uart1_tx, uart1_rx, uart2_tx)
     }
 
+    /// Create a new emulator wired for a live serial console on UART1.
+    ///
+    /// The O2 PROM uses UART1 as the system console (the "Option?" menu,
+    /// command monitor, etc. all read/write it). `stdin_rx` carries
+    /// host→guest console input bytes; `stdout_tx`, if given, receives every
+    /// guest→host console byte (in addition to the internal channel drained
+    /// by [`Emulator::drain_console_output`], which keeps working).
+    pub fn with_console(
+        ram_mb: u32,
+        stdin_rx: std::sync::mpsc::Receiver<u8>,
+        stdout_tx: Option<std::sync::mpsc::Sender<u8>>,
+    ) -> Self {
+        // UART1: guest input comes from `stdin_rx`; guest output is fanned
+        // out to `stdout_tx` via `console_tx_ext`. The passthrough senders
+        // have no host consumer in this configuration.
+        let (uart1_tx, _unused_uart1_rx) = std::sync::mpsc::channel();
+        let (uart2_tx, _unused_uart2_rx) = std::sync::mpsc::channel();
+        let mut emu = Self::with_ram(ram_mb, uart1_tx, stdin_rx, uart2_tx);
+        if let Some(tx) = stdout_tx {
+            emu.memory.mace.isa_ext.uart1.set_console_tx_ext(tx);
+        }
+        emu
+    }
+
     /// Load a PROM image from a file and map it into memory.
     pub fn load_prom(&mut self, path: &str) -> anyhow::Result<()> {
         let prom = Prom::from_file(path)?;
@@ -169,40 +193,71 @@ impl Emulator {
         log::info_msg("Emulator reset");
     }
 
+    /// Slice size for device-time advancement during long runs.
+    ///
+    /// Device clocks (CRIME timer, MACE UST, audio) are advanced from the
+    /// CPU's cycle counter only on slice boundaries. The slice must be small
+    /// enough that the PROM's short polled-delay loops (e.g. `us_delay(2)`
+    /// spinning on the CRIME timer for ~130 ticks) make progress *within* a
+    /// run; when the whole run was a single slice, every micro-delay cost an
+    /// entire run chunk (~1M instructions) and boot effectively stalled.
+    const RUN_SLICE: u64 = 8_192;
+
+    /// Advance device clocks by the CPU cycles consumed since `before`,
+    /// and service reset requests.
+    fn tick_devices(&mut self, before: u64) {
+        let delta = self.cpu.cycles().wrapping_sub(before);
+        self.memory.crime_cpu.advance_time(delta);
+        self.memory.audio_tick(delta);
+        self.memory.mace_advance_ust(delta);
+        self.memory.gbe.advance(delta);
+        self.check_crime_reset();
+    }
+
     /// Execute a single instruction.
     pub fn step(&mut self) {
         let before = self.cpu.cycles();
         let mut bus = bus::SystemBus { memory: &mut self.memory, cache: &mut self.cache };
         self.cpu.step(&mut bus);
-        let delta = self.cpu.cycles().wrapping_sub(before);
-        self.memory.crime_cpu.advance_time(delta);
-        self.memory.audio_tick(delta);
-        self.memory.mace_advance_ust(delta);
-        self.check_crime_reset();
+        self.tick_devices(before);
     }
 
     /// Run for `n` cycles.
     pub fn run(&mut self, n: u64) {
-        let before = self.cpu.cycles();
-        let mut bus = bus::SystemBus { memory: &mut self.memory, cache: &mut self.cache };
-        self.cpu.run(&mut bus, n);
-        let delta = self.cpu.cycles().wrapping_sub(before);
-        self.memory.crime_cpu.advance_time(delta);
-        self.memory.audio_tick(delta);
-        self.memory.mace_advance_ust(delta);
-        self.check_crime_reset();
+        let mut remaining = n;
+        while remaining > 0 {
+            let slice = remaining.min(Self::RUN_SLICE);
+            let before = self.cpu.cycles();
+            let mut bus =
+                bus::SystemBus { memory: &mut self.memory, cache: &mut self.cache };
+            self.cpu.run(&mut bus, slice);
+            drop(bus);
+            self.tick_devices(before);
+            if self.cpu.is_stopped() {
+                break;
+            }
+            let spent = self.cpu.cycles().wrapping_sub(before);
+            // Guard against a stopped/halted CPU making no progress.
+            if spent == 0 {
+                break;
+            }
+            remaining = remaining.saturating_sub(spent);
+        }
     }
 
     /// Run until the program counter reaches `target_pc`.
     pub fn run_until(&mut self, target_pc: u32) {
-        let before = self.cpu.cycles();
-        let mut bus = bus::SystemBus { memory: &mut self.memory, cache: &mut self.cache };
-        self.cpu.run_until(&mut bus, target_pc);
-        let delta = self.cpu.cycles().wrapping_sub(before);
-        self.memory.crime_cpu.advance_time(delta);
-        self.memory.audio_tick(delta);
-        self.memory.mace_advance_ust(delta);
-        self.check_crime_reset();
+        loop {
+            let before = self.cpu.cycles();
+            let mut bus =
+                bus::SystemBus { memory: &mut self.memory, cache: &mut self.cache };
+            self.cpu.run_until(&mut bus, target_pc);
+            drop(bus);
+            self.tick_devices(before);
+            if self.pc() == target_pc || self.cpu.is_stopped() {
+                break;
+            }
+        }
     }
 
     /// If CRIME requested a reset, restart the CPU at the reset vector.
@@ -354,8 +409,6 @@ impl Emulator {
 
     /// Flush queued keyboard/mouse input (used by front-ends on focus loss).
     pub fn flush_input(&mut self) {
-        let kbdms = &mut self.memory.mace.perif.kbdms;
-        kbdms.keyboard_input.clear();
-        kbdms.mouse_input.clear();
+        self.memory.mace.perif.kbdms.clear_input();
     }
 }

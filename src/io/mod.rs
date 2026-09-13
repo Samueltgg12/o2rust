@@ -171,11 +171,21 @@ pub mod perif {
     // Keyboard/Mouse (PS/2) - offset 0x20000
     pub mod kbdms {
         pub const BASE: u32 = 0x20000;
-        pub const KBD_DATA: u32 = 0x0000; // Keyboard data
-        pub const KBD_CTRL: u32 = 0x0004; // Keyboard control
-        pub const MS_DATA: u32 = 0x0008;  // Mouse data
-        pub const MS_CTRL: u32 = 0x000C;  // Mouse control
-        pub const STATUS: u32 = 0x0010;   // Combined status
+        // MACE PS/2 registers (per the IRIX PROM `definitions.h` /
+        // linux `drivers/input/serio/maceps2.c`). Each is a 32-bit register
+        // in the low lane of a 64-bit big-endian slot.
+        pub const KBD_TX: u32 = 0x00; // Keyboard transmit buffer (W)
+        pub const KBD_RX: u32 = 0x08; // Keyboard receive buffer (R)
+        pub const KBD_CTRL: u32 = 0x10; // Keyboard control
+        pub const KBD_STATUS: u32 = 0x18; // Keyboard status (R)
+        pub const MS_TX: u32 = 0x20; // Mouse transmit buffer (W)
+        pub const MS_RX: u32 = 0x28; // Mouse receive buffer (R)
+        pub const MS_CTRL: u32 = 0x30; // Mouse control
+        pub const MS_STATUS: u32 = 0x38; // Mouse status (R)
+
+        // Status bits (PS2_STATUS_* in maceps2.c).
+        pub const ST_TX_EMPTY: u32 = 0x08; // transmit buffer empty / idle
+        pub const ST_RX_FULL: u32 = 0x10; // receive buffer full
     }
 
     // I2C - offset 0x30000
@@ -1091,49 +1101,94 @@ impl IsaState {
     }
 }
 
-/// Keyboard/Mouse (PS/2) state.
+/// One MACE PS/2 port (keyboard or mouse).
+///
+/// Host device input arrives through the `rx` queue (scan-set-2 bytes for
+/// the keyboard, 3-byte relative packets for the mouse). The port also
+/// answers the guest's device commands: a TX that completes synthesizes the
+/// command ACK (`0xFA`), plus the `0xAA` self-test-OK after RESET (`0xFF`),
+/// so the PROM's command waits finish immediately instead of running their
+/// full (long) timeout.
+#[derive(Debug, Default)]
+struct Ps2PortState {
+    control: u32,
+    /// A TX is between the guest's write and completion.
+    tx_in_progress: bool,
+    /// Pending guest←device bytes (host input + synthesized ACKs).
+    rx: VecDeque<u8>,
+    /// Last byte popped, staged for the second lane of a 64-bit RX read.
+    rx_staged: Option<u8>,
+    /// Last command byte transmitted (to decide whether to answer 0xAA).
+    last_command: u8,
+}
+
+impl Ps2PortState {
+    fn status(&self) -> u32 {
+        let mut st = perif::kbdms::ST_TX_EMPTY; // idle transmitter
+        if self.tx_in_progress {
+            st &= !perif::kbdms::ST_TX_EMPTY; // completion clears
+        }
+        if !self.rx.is_empty() {
+            st |= perif::kbdms::ST_RX_FULL;
+        }
+        st
+    }
+
+    fn tx_byte(&mut self, byte: u8) {
+        self.tx_in_progress = true;
+        self.last_command = byte;
+    }
+
+    /// Complete a pending transmission (device answers the command).
+    fn complete_tx(&mut self) {
+        if !self.tx_in_progress {
+            return;
+        }
+        self.tx_in_progress = false;
+        // Every PS/2 device command is ACKed; RESET additionally self-tests.
+        self.rx.push_back(0xFA);
+        if self.last_command == 0xFF {
+            self.rx.push_back(0xAA);
+        }
+    }
+
+    fn read_rx(&mut self, low_lane: bool) -> u32 {
+        let byte = if low_lane {
+            match self.rx_staged.take() {
+                Some(b) => b,
+                None => self.rx.pop_front().unwrap_or(0),
+            }
+        } else {
+            let b = self.rx.pop_front().unwrap_or(0);
+            self.rx_staged = Some(b);
+            b
+        };
+        u32::from(byte)
+    }
+}
+
+/// Keyboard/Mouse (PS/2) state — MACE PS/2 block.
 ///
 /// Host keyboard/mouse input arrives through [`KbdMsState::push_kbd_byte`] and
 /// [`KbdMsState::push_ms_byte`] (PS/2 scan set 2 for the keyboard, standard
-/// 3-byte relative packets for the mouse); the guest firmware / drivers read
-/// them back out of [`PerifState::read32`] one byte at a time.
-#[derive(Debug)]
+/// 3-byte relative packets for the mouse) and is read back by the guest out
+/// of the RX buffers. Register offsets and status bits follow
+/// `definitions.h` (`MACE_KEYBOARD_*`) and the Linux `maceps2` driver.
+#[derive(Debug, Default)]
 pub struct KbdMsState {
-    pub kbd_data: u32,
-    pub kbd_ctrl: u32,
-    pub ms_data: u32,
-    pub ms_ctrl: u32,
-    pub status: u32,
-    /// PS/2 keyboard bytes queued from the host, LIFO-fed by the 8042.
-    pub keyboard_input: VecDeque<u8>,
-    /// PS/2 mouse bytes queued from the host.
-    pub mouse_input: VecDeque<u8>,
+    kbd: Ps2PortState,
+    ms: Ps2PortState,
 }
 
 /// Maximum number of queued input bytes per device before the host-side FIFO
 /// starts dropping (guards the guest polling long stretches of dead code).
 const INPUT_FIFO_CAPACITY: usize = 256;
 
-impl Default for KbdMsState {
-    fn default() -> Self {
-        Self {
-            kbd_data: 0,
-            kbd_ctrl: 0,
-            ms_data: 0,
-            ms_ctrl: 0,
-            status: 0,
-            keyboard_input: VecDeque::new(),
-            mouse_input: VecDeque::new(),
-        }
-    }
-}
-
 impl KbdMsState {
     /// Queue a host keyboard scan-code byte for the guest.
     pub fn push_kbd_byte(&mut self, byte: u8) {
-        if self.keyboard_input.len() < INPUT_FIFO_CAPACITY {
-            self.keyboard_input.push_back(byte);
-            self.status |= 1; // 8042 OBF
+        if self.kbd.rx.len() < INPUT_FIFO_CAPACITY {
+            self.kbd.rx.push_back(byte);
         } else {
             log::debug!("keyboard input FIFO full, dropping byte 0x{byte:02X}");
         }
@@ -1141,9 +1196,8 @@ impl KbdMsState {
 
     /// Queue a host mouse packet byte for the guest.
     pub fn push_ms_byte(&mut self, byte: u8) {
-        if self.mouse_input.len() < INPUT_FIFO_CAPACITY {
-            self.mouse_input.push_back(byte);
-            self.status |= 4; // 8042 OBF (mouse)
+        if self.ms.rx.len() < INPUT_FIFO_CAPACITY {
+            self.ms.rx.push_back(byte);
         } else {
             log::debug!("mouse input FIFO full, dropping byte 0x{byte:02X}");
         }
@@ -1151,76 +1205,75 @@ impl KbdMsState {
 
     /// Whether guest-pending keyboard data is available.
     pub fn has_kbd_data(&self) -> bool {
-        !self.keyboard_input.is_empty()
+        !self.kbd.rx.is_empty()
     }
 
     /// Whether guest-pending mouse data is available.
     pub fn has_ms_data(&self) -> bool {
-        !self.mouse_input.is_empty()
+        !self.ms.rx.is_empty()
+    }
+
+    /// Drop all queued host input (both ports).
+    pub fn clear_input(&mut self) {
+        self.kbd.rx.clear();
+        self.ms.rx.clear();
+        self.kbd.rx_staged = None;
+        self.ms.rx_staged = None;
+    }
+
+    /// Whether `offset` is the high (base) lane of a 64-bit register slot
+    /// rather than the +4 low lane holding the 32-bit register.
+    fn is_low_lane(offset: u32) -> bool {
+        offset % 8 == 4
+    }
+
+    /// Return the register index (slot) for an access, whichever lane.
+    fn slot(offset: u32) -> u32 {
+        offset & !7
     }
 
     pub fn read32(&mut self, offset: u32) -> u32 {
-        match offset {
-            perif::kbdms::KBD_DATA => {
-                if let Some(byte) = self.keyboard_input.pop_front() {
-                    self.kbd_data = u32::from(byte);
-                }
-                // Output-buffer-full tracks whether more bytes remain.
-                let obf_set = self.has_kbd_data();
-                if obf_set {
-                    self.status |= 1;
-                } else {
-                    self.status &= !1;
-                }
-                self.kbd_data
+        let low = Self::is_low_lane(offset);
+        match Self::slot(offset) {
+            perif::kbdms::KBD_RX => self.kbd.read_rx(low),
+            perif::kbdms::MS_RX => self.ms.read_rx(low),
+            perif::kbdms::KBD_CTRL => self.kbd.control,
+            perif::kbdms::MS_CTRL => self.ms.control,
+            perif::kbdms::KBD_STATUS => {
+                self.kbd.complete_tx();
+                self.kbd.status()
             }
-            perif::kbdms::MS_DATA => {
-                if let Some(byte) = self.mouse_input.pop_front() {
-                    self.ms_data = u32::from(byte);
-                }
-                let obf_set = self.has_ms_data();
-                if obf_set {
-                    self.status |= 4;
-                } else {
-                    self.status &= !4;
-                }
-                self.ms_data
+            perif::kbdms::MS_STATUS => {
+                self.ms.complete_tx();
+                self.ms.status()
             }
-            perif::kbdms::KBD_CTRL => self.kbd_ctrl,
-            perif::kbdms::MS_CTRL => self.ms_ctrl,
-            perif::kbdms::STATUS => self.status,
-            _ => {
-                log::warn!("KBD/MS read32: unimplemented offset 0x{:04X}", offset);
-                0
-            }
+            _ => 0,
         }
     }
 
-    /// Read without consuming queued input bytes (used by the address guard).
+    /// Read without consuming queued input bytes or changing TX state
+    /// (used by the address guard).
     pub fn read32_immutable(&self, offset: u32) -> u32 {
-        match offset {
-            perif::kbdms::KBD_DATA => self.kbd_data,
-            perif::kbdms::KBD_CTRL => self.kbd_ctrl,
-            perif::kbdms::MS_DATA => self.ms_data,
-            perif::kbdms::MS_CTRL => self.ms_ctrl,
-            perif::kbdms::STATUS => self.status,
-            _ => {
-                log::warn!("KBD/MS read32_immutable: unimplemented offset 0x{:04X}", offset);
-                0
+        match Self::slot(offset) {
+            perif::kbdms::KBD_RX => {
+                u32::from(*self.kbd.rx.front().unwrap_or(&0))
             }
+            perif::kbdms::MS_RX => u32::from(*self.ms.rx.front().unwrap_or(&0)),
+            perif::kbdms::KBD_CTRL => self.kbd.control,
+            perif::kbdms::MS_CTRL => self.ms.control,
+            perif::kbdms::KBD_STATUS => self.kbd.status(),
+            perif::kbdms::MS_STATUS => self.ms.status(),
+            _ => 0,
         }
     }
 
     pub fn write32(&mut self, offset: u32, value: u32) {
-        match offset {
-            perif::kbdms::KBD_DATA => self.kbd_data = value,
-            perif::kbdms::KBD_CTRL => self.kbd_ctrl = value,
-            perif::kbdms::MS_DATA => self.ms_data = value,
-            perif::kbdms::MS_CTRL => self.ms_ctrl = value,
-            perif::kbdms::STATUS => self.status = value,
-            _ => {
-                log::warn!("KBD/MS write32: unimplemented offset 0x{:04X} = 0x{:08X}", offset, value);
-            }
+        match Self::slot(offset) {
+            perif::kbdms::KBD_TX => self.kbd.tx_byte(value as u8),
+            perif::kbdms::MS_TX => self.ms.tx_byte(value as u8),
+            perif::kbdms::KBD_CTRL => self.kbd.control = value,
+            perif::kbdms::MS_CTRL => self.ms.control = value,
+            _ => {}
         }
     }
 }
@@ -1507,6 +1560,11 @@ pub struct UartState {
     pub console_tx: Option<std::sync::mpsc::Sender<u8>>,
     pub console_out_rx: Option<std::sync::mpsc::Receiver<u8>>,
     pub console_rx: Option<std::sync::mpsc::Receiver<u8>>,
+    /// Additional guest→host output channel owned by a front-end (e.g. the
+    /// CLI's stdout pump). Bytes written to THR are fanned out to both this
+    /// and the internal `console_out_rx` channel used by
+    /// [`crate::system::Emulator::drain_console_output`].
+    pub console_tx_ext: Option<std::sync::mpsc::Sender<u8>>,
 }
 
 impl UartState {
@@ -1549,13 +1607,24 @@ impl UartState {
         }
     }
 
-    /// Try to write a character to the console output (non-blocking).
+    /// Attach an external guest→host output channel (front-end console sink).
+    pub fn set_console_tx_ext(&mut self, tx: std::sync::mpsc::Sender<u8>) {
+        self.console_tx_ext = Some(tx);
+    }
+
+    /// Try to write a character to the console output (non-blocking). The
+    /// byte is fanned out to both the internal channel (drained by
+    /// `drain_console_output`) and the front-end channel, if attached;
+    /// returns true if any channel accepted it.
     fn try_write_console(&mut self, ch: u8) -> bool {
+        let mut sent = false;
         if let Some(tx) = &self.console_tx {
-            tx.send(ch).is_ok()
-        } else {
-            false
+            sent |= tx.send(ch).is_ok();
         }
+        if let Some(tx) = &self.console_tx_ext {
+            sent |= tx.send(ch).is_ok();
+        }
+        sent
     }
 
     pub fn read32(&mut self, offset: u32) -> u32 {

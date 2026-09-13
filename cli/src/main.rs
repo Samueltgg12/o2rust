@@ -5,8 +5,9 @@
 //! ports, outputs emulated audio via cpal, and mounts disk images — chosen via
 //! `rfd` file dialogs when not given on the command line.
 //!
-//! `--headless` runs the classic console front-end (stdin → UART1, UART2 →
-//! stdout) without a window or disks.
+//! `--headless` runs the serial console front-end: the PROM's UART1 system
+//! console is attached to stdin/stdout (raw terminal mode, full interaction:
+//! command monitor, "System Maintenance Menu", etc.) without a window.
 
 mod args;
 mod audio;
@@ -31,8 +32,20 @@ fn main() -> Result<()> {
 
     // The tracing subscriber reads RUST_LOG (o2rust::log::init); honour the
     // `-l`/`--log-filter` argument by seeding it before init.
+    //
+    // In headless mode stdout is the emulated machine's serial console and
+    // stderr is ours; the I/O register-poke warnings the PROM otherwise
+    // triggers hundreds of times per boot (KBD/MS probes etc.) bury it, so
+    // the default headless filter keeps only CPU-level diagnostics (which
+    // signal real emulation bugs). Anything else is still available with
+    // `-l`/`-v`.
+    let filter = if args.headless && !args.verbose && args.log_filter_is_default() {
+        "o2rust::cpu=warn".to_string()
+    } else {
+        args.effective_log_filter()
+    };
     unsafe {
-        std::env::set_var("RUST_LOG", args.effective_log_filter());
+        std::env::set_var("RUST_LOG", filter);
     }
     o2rust::log::init();
 
@@ -49,13 +62,12 @@ fn main() -> Result<()> {
 }
 
 fn run(args: Args) -> Result<()> {
-    // Console channels for UART1 (console I/O) and UART2 (console output).
-    let (uart1_tx, uart1_rx) = mpsc::channel::<u8>();
-    let (uart2_tx, uart2_rx) = mpsc::channel::<u8>();
-    // Clone for the headless stdin thread (kept until the emulator owns it).
-    let uart1_tx_stdin = uart1_tx.clone();
+    // Console channels for UART1 (the O2 system console): `stdin_*` carries
+    // host→guest bytes, `console_*` carries guest→host console output.
+    let (stdin_tx, stdin_rx) = mpsc::channel::<u8>();
+    let (console_tx, console_rx) = mpsc::channel::<u8>();
 
-    let mut emulator = Emulator::with_ram(args.ram_mb, uart1_tx, uart1_rx, uart2_tx);
+    let mut emulator = Emulator::with_console(args.ram_mb, stdin_rx, Some(console_tx));
     emulator
         .load_prom(&args.prom)
         .with_context(|| format!("failed to load PROM '{}'", args.prom))?;
@@ -64,8 +76,12 @@ fn run(args: Args) -> Result<()> {
     mount_disks(&mut emulator, &args)?;
 
     if args.headless {
-        run_headless(emulator, &args, uart2_rx, uart1_tx_stdin)
+        run_headless(emulator, &args, console_rx, stdin_tx)
     } else {
+        // Windowed mode gets the guest console mirrored to stdout, too — the
+        // GBE graphics console is not wired yet, so the serial console is the
+        // only way to see what the PROM is saying.
+        spawn_console_printer(console_rx);
         run_windowed(emulator, &args)
     }
 }
@@ -120,37 +136,114 @@ fn mount_disks(emulator: &mut Emulator, args: &Args) -> Result<()> {
     Ok(())
 }
 
-/// Headless mode: run the PROM with UART console I/O on stdin/stdout.
-fn run_headless(
-    mut emulator: Emulator,
-    args: &Args,
-    uart2_rx: mpsc::Receiver<u8>,
-    uart1_tx_stdin: mpsc::Sender<u8>,
-) -> Result<()> {
-    info!("headless mode — console on stdin/stdout (hang up to exit)");
-
-    // stdin → UART1 (console input)
-    thread::spawn(move || {
-        let mut stdin = io::stdin();
-        let mut buf = [0u8; 1];
-        loop {
-            match stdin.read_exact(&mut buf) {
-                Ok(_) if uart1_tx_stdin.send(buf[0]).is_err() => break,
-                Ok(_) => {}
-                Err(_) => break,
-            }
-        }
-    });
-
-    // UART2 → stdout (console output)
+/// Stream guest console bytes to stdout.
+fn spawn_console_printer(console_rx: mpsc::Receiver<u8>) {
     thread::spawn(move || {
         let mut stdout = io::stdout();
-        while let Ok(byte) = uart2_rx.recv() {
+        while let Ok(byte) = console_rx.recv() {
             if stdout.write_all(&[byte]).is_err() || stdout.flush().is_err() {
                 break;
             }
         }
     });
+}
+
+/// Put stdin into non-canonical, no-echo mode while the guard lives, so
+/// single keypresses reach the PROM console without waiting for Enter.
+/// ISIG is deliberately kept: Ctrl+C still terminates the emulator.
+/// Returns `None` when stdin is not a TTY (e.g. a pipe), which is fine: the
+/// caller still gets bytes, just line-buffered.
+struct RawModeGuard(libc::termios);
+
+fn enter_raw_mode() -> Option<RawModeGuard> {
+    unsafe {
+        let mut term: libc::termios = std::mem::zeroed();
+        if libc::tcgetattr(libc::STDIN_FILENO, &mut term) != 0 {
+            return None; // not a terminal — keep cooked mode
+        }
+        let orig = term;
+        // Non-canonical + no echo, but keep ISIG (Ctrl+C → SIGINT) and OPOST.
+        term.c_lflag &= !(libc::ICANON | libc::ECHO);
+        term.c_cc[libc::VMIN] = 1;
+        term.c_cc[libc::VTIME] = 0;
+        if libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &term) != 0 {
+            return None;
+        }
+        Some(RawModeGuard(orig))
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        unsafe {
+            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.0);
+        }
+    }
+}
+
+/// Saved cooked-mode termios so the SIGINT handler can restore the terminal.
+static SAVED_TERMIOS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static mut SAVED_TERMIOS_CELL: std::mem::MaybeUninit<libc::termios> =
+    std::mem::MaybeUninit::uninit();
+
+unsafe extern "C" fn on_sigint(_sig: libc::c_int) {
+    if SAVED_TERMIOS.load(std::sync::atomic::Ordering::Relaxed) != 0 {
+        unsafe {
+            let ptr = std::ptr::addr_of!(SAVED_TERMIOS_CELL).cast::<libc::termios>();
+            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &*ptr);
+        }
+    }
+    std::process::exit(130);
+}
+
+/// Install a SIGINT handler that restores the terminal and exits.
+fn install_sigint_handler() {
+    unsafe {
+        libc::signal(libc::SIGINT, on_sigint as libc::sighandler_t);
+    }
+}
+
+/// Headless mode: run the PROM with the UART1 console on stdin/stdout.
+fn run_headless(
+    mut emulator: Emulator,
+    args: &Args,
+    console_rx: mpsc::Receiver<u8>,
+    stdin_tx: mpsc::Sender<u8>,
+) -> Result<()> {
+    info!("headless mode — console on stdin/stdout (Ctrl+C to quit)");
+
+    // Raw terminal mode so single keypresses reach the PROM immediately,
+    // plus a SIGINT handler so Ctrl+C restores the terminal before exiting.
+    let _raw = enter_raw_mode().inspect(|raw| {
+        unsafe {
+            let cell = &mut *std::ptr::addr_of_mut!(SAVED_TERMIOS_CELL);
+            cell.write(raw.0);
+        }
+        SAVED_TERMIOS.store(1, std::sync::atomic::Ordering::Relaxed);
+    });
+    install_sigint_handler();
+
+    // stdin → UART1 (console input)
+    thread::spawn(move || {
+        let mut stdin = io::stdin();
+        let mut buf = [0u8; 64];
+        loop {
+            match stdin.read(&mut buf) {
+                Ok(0) => break, // EOF
+                Ok(n) => {
+                    for &b in &buf[..n] {
+                        if stdin_tx.send(b).is_err() {
+                            return;
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    // UART1 → stdout (console output)
+    spawn_console_printer(console_rx);
 
     if args.steps > 0 {
         emulator.run(args.steps);
@@ -160,7 +253,6 @@ fn run_headless(
             args.steps
         );
     } else {
-        info!("running until stopped (Ctrl+C to quit)");
         loop {
             emulator.run(1_000_000);
         }

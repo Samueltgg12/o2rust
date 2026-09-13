@@ -194,7 +194,11 @@ impl CrimeCpuInterface {
     /// Create a new CRIME CPU Interface.
     pub fn new() -> Self {
         Self {
-            id: 0x0000_0001, // CRIME revision 1
+            // CRIME revision 0xA1, the production silicon the PROM
+            // recognizes — `crmGetRev()` reads this (at 0x14000004) and
+            // `initGraphics` brings up the GBE console *only* when it
+            // matches 0x000000a1 (`crm_init.c`).
+            id: 0x0000_00A1,
             control: crime_control::ENDIAN_BIG, // Big-endian default
             intmask: 0,
             mem_control: 0,
@@ -272,6 +276,9 @@ impl AddressSpace for CrimeCpuInterface {
     fn read32(&mut self, addr: u32) -> u32 {
         match addr {
             crime_cpu::CRM_ID => self.id,
+            // Low lane of CRM_ID's 64-bit slot: `crmGetRev()` (`crmDefs.h`)
+            // reads the revision from 0x14000004.
+            a if a == crime_cpu::CRM_ID + 4 => self.id,
             // CRM_CONTROL is a 32-bit register living in the *low* lane of its
             // 64-bit big-endian slot (offset +4 on the bus). Both lane accesses
             // return the control word so `lw`/`ld` see the same value.
@@ -600,7 +607,7 @@ mod pixpipe {
     pub const WIN_OFFSET_SRC: u32 = 0x050;
     pub const WIN_OFFSET_DST: u32 = 0x058;
     pub const PRIMITIVE: u32 = 0x060;
-    pub const VERTEX_X: u32 = 0x070; // 3 vertices * 8 bytes
+    pub const VERTEX_X: u32 = 0x070; // 4 vertices * 4 bytes (CRM_VERTEX_X_XY0/1/2)
     pub const VERTEX_GL: u32 = 0x080; // 3 vertices * 8 bytes
     pub const START_SETUP: u32 = 0x098;
     pub const PIXEL_XFER_SRC: u32 = 0x0a0;
@@ -685,6 +692,10 @@ mod draw_mode {
 /// CRIME Render Engine (MRE) state.
 #[derive(Debug)]
 pub struct RenderEngine {
+    /// Debug counters: (rasterize calls by opcode 0..8, pixels written).
+    pub raster_stats: (std::collections::BTreeMap<u32, u64>, u64),
+    /// Debug counters for every pixpipe write, by offset.
+    pub pixpipe_write_stats: std::collections::BTreeMap<u32, u64>,
     // Interface Buffer (page 0)
     intfbuf_data: [u32; 64],
     intfbuf_addr: [u32; 64],
@@ -706,12 +717,13 @@ pub struct RenderEngine {
     win_offset_src: u32,
     win_offset_dst: u32,
     primitive: u32,
-    vertex_x: [u32; 3],
+    vertex_x: [u32; 4],
     vertex_gl: [u64; 3],
     start_setup: u32,
     pixel_xfer_src: u32,
     pixel_xfer_dst: u32,
     stipple: u32,
+    stipple_pattern: u32,
     shade: [u32; 12],
     texture: [u32; 23],
     fog: u32,
@@ -759,12 +771,13 @@ impl Default for RenderEngine {
             win_offset_src: 0,
             win_offset_dst: 0,
             primitive: 0,
-            vertex_x: [0; 3],
+            vertex_x: [0; 4],
             vertex_gl: [0; 3],
             start_setup: 0,
             pixel_xfer_src: 0,
             pixel_xfer_dst: 0,
             stipple: 0,
+            stipple_pattern: 0,
             shade: [0; 12],
             texture: [0; 23],
             fog: 0,
@@ -787,6 +800,8 @@ impl Default for RenderEngine {
             mte_dstystep: 0,
             status: 0,
             set_start_ptr: 0,
+            raster_stats: Default::default(),
+            pixpipe_write_stats: Default::default(),
         }
     }
 }
@@ -812,7 +827,12 @@ impl AddressSpace for RenderEngine {
 
     fn read32(&mut self, addr: u32) -> u32 {
         let page = addr & 0xf000;
-        let offset = addr & 0xfff;
+        let offset = {
+            let o = addr & 0xfff;
+            // Start space (CRM_START_OFFSET = +0x800): immediate-execute
+            // aliases of the pixpipe registers.
+            if page == 0x2000 && (0x800..0xa00).contains(&o) { o - 0x800 } else { o }
+        };
 
         match page {
             re_page::INTFBUF => match offset {
@@ -872,8 +892,8 @@ impl AddressSpace for RenderEngine {
                 if offset == pixpipe::WIN_OFFSET_DST { return self.win_offset_dst; }
                 if offset == pixpipe::PRIMITIVE { return self.primitive; }
                 if offset >= pixpipe::VERTEX_X && offset <= pixpipe::VERTEX_X + 16 {
-                    let idx = ((offset - pixpipe::VERTEX_X) / 8) as usize;
-                    return if idx < 3 { self.vertex_x[idx] } else { 0 };
+                    let idx = ((offset - pixpipe::VERTEX_X) / 4) as usize;
+                    return if idx < 4 { self.vertex_x[idx] } else { 0 };
                 }
                 if offset >= pixpipe::VERTEX_GL && offset <= pixpipe::VERTEX_GL + 20 {
                     let idx = ((offset - pixpipe::VERTEX_GL) / 8) as usize;
@@ -883,6 +903,7 @@ impl AddressSpace for RenderEngine {
                 if offset == pixpipe::PIXEL_XFER_SRC { return self.pixel_xfer_src; }
                 if offset == pixpipe::PIXEL_XFER_DST { return self.pixel_xfer_dst; }
                 if offset == pixpipe::STIPPLE { return self.stipple; }
+                if offset == pixpipe::STIPPLE + 4 { return self.stipple_pattern; }
                 if offset >= pixpipe::SHADE && offset <= pixpipe::SHADE + 44 {
                     let idx = ((offset - pixpipe::SHADE) / 4) as usize;
                     return if idx < 12 { self.shade[idx] } else { 0 };
@@ -929,7 +950,12 @@ impl AddressSpace for RenderEngine {
 
     fn read64(&mut self, addr: u32) -> u64 {
         let page = addr & 0xf000;
-        let offset = addr & 0xfff;
+        let offset = {
+            let o = addr & 0xfff;
+            // Start space (CRM_START_OFFSET = +0x800): immediate-execute
+            // aliases of the pixpipe registers.
+            if page == 0x2000 && (0x800..0xa00).contains(&o) { o - 0x800 } else { o }
+        };
 
         // TLB entries are 64-bit
         if page == re_page::TLB {
@@ -976,7 +1002,12 @@ impl AddressSpace for RenderEngine {
 
     fn write32(&mut self, addr: u32, value: u32) {
         let page = addr & 0xf000;
-        let offset = addr & 0xfff;
+        let offset = {
+            let o = addr & 0xfff;
+            // Start space (CRM_START_OFFSET = +0x800): immediate-execute
+            // aliases of the pixpipe registers.
+            if page == 0x2000 && (0x800..0xa00).contains(&o) { o - 0x800 } else { o }
+        };
 
         match page {
             re_page::INTFBUF => {
@@ -1019,6 +1050,7 @@ impl AddressSpace for RenderEngine {
                 }
             }
             re_page::PIXPIPE => {
+                *self.pixpipe_write_stats.entry(offset).or_insert(0) += 1;
                 if offset == pixpipe::BUF_MODE_SRC { self.buf_mode_src = value; }
                 else if offset == pixpipe::BUF_MODE_DST { self.buf_mode_dst = value; }
                 else if offset == pixpipe::CLIP_MODE { self.clip_mode = value; }
@@ -1028,8 +1060,8 @@ impl AddressSpace for RenderEngine {
                 else if offset == pixpipe::WIN_OFFSET_DST { self.win_offset_dst = value; }
                 else if offset == pixpipe::PRIMITIVE { self.primitive = value; }
                 else if offset >= pixpipe::VERTEX_X && offset <= pixpipe::VERTEX_X + 16 {
-                    let idx = ((offset - pixpipe::VERTEX_X) / 8) as usize;
-                    if idx < 3 { self.vertex_x[idx] = value; }
+                    let idx = ((offset - pixpipe::VERTEX_X) / 4) as usize;
+                    if idx < 4 { self.vertex_x[idx] = value; }
                 }
                 else if offset >= pixpipe::VERTEX_GL && offset <= pixpipe::VERTEX_GL + 20 {
                     let idx = ((offset - pixpipe::VERTEX_GL) / 8) as usize;
@@ -1039,6 +1071,7 @@ impl AddressSpace for RenderEngine {
                 else if offset == pixpipe::PIXEL_XFER_SRC { self.pixel_xfer_src = value; }
                 else if offset == pixpipe::PIXEL_XFER_DST { self.pixel_xfer_dst = value; }
                 else if offset == pixpipe::STIPPLE { self.stipple = value; }
+                else if offset == pixpipe::STIPPLE + 4 { self.stipple_pattern = value; }
                 else if offset >= pixpipe::SHADE && offset <= pixpipe::SHADE + 44 {
                     let idx = ((offset - pixpipe::SHADE) / 4) as usize;
                     if idx < 12 { self.shade[idx] = value; }
@@ -1087,7 +1120,12 @@ impl AddressSpace for RenderEngine {
 
     fn write64(&mut self, addr: u32, value: u64) {
         let page = addr & 0xf000;
-        let offset = addr & 0xfff;
+        let offset = {
+            let o = addr & 0xfff;
+            // Start space (CRM_START_OFFSET = +0x800): immediate-execute
+            // aliases of the pixpipe registers.
+            if page == 0x2000 && (0x800..0xa00).contains(&o) { o - 0x800 } else { o }
+        };
 
         // TLB entries are 64-bit
         if page == re_page::TLB {
@@ -1167,17 +1205,20 @@ mod gbe {
     pub const CRS_START_XY: u32 = 0x10048;
     pub const VC_START_XY: u32 = 0x1004c;
 
-    // Overlay plane (offset 0x20000)
+    // Overlay plane (offset 0x20000; layout per Linux `include/video/gbe.h`)
     pub const OVR_WIDTH_TILE: u32 = 0x20000;
-    pub const OVR_CONTROL: u32 = 0x20004;
+    pub const OVR_INHWCTRL: u32 = 0x20004; // latched/visible ovr_control
+    pub const OVR_CONTROL: u32 = 0x20008; // tile list ptr + DMA enable
 
     // Framebuffer plane (offset 0x30000)
     pub const FRM_SIZE_TILE: u32 = 0x30000;
     pub const FRM_SIZE_PIXEL: u32 = 0x30004;
-    pub const FRM_CONTROL: u32 = 0x30008;
+    pub const FRM_INHWCTRL: u32 = 0x30008; // latched/visible frm_control
+    pub const FRM_CONTROL: u32 = 0x3000c; // tile list ptr + DMA enable
 
     // DID control (offset 0x40000)
-    pub const DID_CONTROL: u32 = 0x40000;
+    pub const DID_INHWCTRL: u32 = 0x40000; // latched/visible did_control
+    pub const DID_CONTROL: u32 = 0x40004; // DID table ptr + DMA enable
 
     // WID table (offset 0x48000)
     pub const WID_MODE: u32 = 0x48000; // 32 registers
@@ -1229,6 +1270,11 @@ pub struct GbeDisplayEngine {
     // Video timing
     vt_xy: u32,
     vt_xymax: u32,
+    /// Raster scan position (current X within htotal, current Y within
+    /// vtotal). Advances with emulated time; `vt_xy` reports it packed as
+    /// `(y << 12) | x` (see `waitForBlanking` in crm_init.c).
+    scan_x: u16,
+    scan_y: u16,
     vt_vsync: u32,
     vt_hsync: u32,
     vt_vblank: u32,
@@ -1251,14 +1297,20 @@ pub struct GbeDisplayEngine {
     // Overlay
     ovr_width_tile: u32,
     ovr_control: u32,
+    /// GBE's *in-hardware* shadow of `ovr_control` reported to software.
+    ovr_inhwctrl: u32,
 
     // Framebuffer
     frm_size_tile: u32,
     frm_size_pixel: u32,
     frm_control: u32,
+    /// GBE's *in-hardware* shadow of `frm_control` reported to software.
+    frm_inhwctrl: u32,
 
     // DID
     did_control: u32,
+    /// GBE's *in-hardware* shadow of `did_control` reported to software.
+    did_inhwctrl: u32,
 
     // WID table (32 entries)
     wid_mode: [u32; 32],
@@ -1281,7 +1333,6 @@ pub struct GbeDisplayEngine {
     vc_control: u32,
 
     // Framebuffer tile list (simplified - points to main memory)
-    tile_list_ptr: u32,
 }
 
 impl Default for GbeDisplayEngine {
@@ -1295,6 +1346,8 @@ impl Default for GbeDisplayEngine {
             id: 0,
             vt_xy: 0,
             vt_xymax: 0,
+            scan_x: 0,
+            scan_y: 0,
             vt_vsync: 0,
             vt_hsync: 0,
             vt_vblank: 0,
@@ -1315,10 +1368,13 @@ impl Default for GbeDisplayEngine {
             vc_start_xy: 0,
             ovr_width_tile: 0,
             ovr_control: 0,
+            ovr_inhwctrl: 0,
             frm_size_tile: 0,
             frm_size_pixel: 0,
             frm_control: 0,
+            frm_inhwctrl: 0,
             did_control: 0,
+            did_inhwctrl: 0,
             wid_mode: [0; 32],
             cmap: [0; 4608],
             cm_fifo: 0,
@@ -1331,7 +1387,6 @@ impl Default for GbeDisplayEngine {
             vc_tb: 0,
             vc_filters: 0,
             vc_control: 0,
-            tile_list_ptr: 0,
         }
     }
 }
@@ -1351,38 +1406,88 @@ impl GbeDisplayEngine {
     }
 
     /// Get the current framebuffer width in pixels.
+    ///
+    /// `FRM_SIZE_TILE` fields (`include/video/gbe.h`):
+    /// `WIDTH_TILE` bits 12:5 = width in tiles; each tile is 512 bytes wide,
+    /// so with `depth` = (bits 14:13, 0=8bpp/1=16bpp/2=32bpp) a tile is
+    /// `512 >> depth` pixels.
+    /// Get the current framebuffer width in pixels.
+    ///
+    /// `FRM_SIZE_TILE` fields (`include/video/gbe.h`):
+    /// `WIDTH_TILE` bits 12:5 = number of full (512-byte-wide) tiles,
+    /// `RHS` bits 4:0 = the right-hand-side partial tile in units of 32
+    /// pixels (`initFramebuffer` in crm_init.c).
     pub fn width(&self) -> u32 {
-        (self.frm_size_tile & 0x1ff) * 8 // Tiles are 8 pixels wide
+        let tiles = (self.frm_size_tile >> 5) & 0xff;
+        let rhs = self.frm_size_tile & 0x1f;
+        tiles * (512 >> self.depth()) + rhs * 32
     }
 
-    /// Get the current framebuffer height in pixels.
+    /// Get the current framebuffer height in pixels
+    /// (`FRM_SIZE_PIXEL.FB_HEIGHT_PIX` bits 31:16).
     pub fn height(&self) -> u32 {
         (self.frm_size_pixel >> 16) & 0xffff
     }
 
-    /// Get the framebuffer depth (bits per pixel).
+    /// Get the framebuffer depth code (0 = 8bpp, 1 = 16bpp, 2 = 32bpp).
     pub fn depth(&self) -> u32 {
         (self.frm_size_tile >> 13) & 0x3
     }
 
-    /// Get the framebuffer tile list pointer (physical address of the tile
-    /// pointer list in main memory).
+    /// Physical address of the framebuffer tile-pointer list in main memory
+    /// (`FRM_CONTROL.FRM_TILE_PTR`, bits 31:9 — a physical address in 512-byte
+    /// units; each 16-bit entry is a tile's physical address >> 16).
     pub fn tile_list_ptr(&self) -> u32 {
-        self.tile_list_ptr
+        self.frm_control & 0xFFFF_FE00
+    }
+
+    /// Advance the display scan-out by `delta` CRIME ticks (nominally one
+    /// ~133 MHz tick per CPU cycle; close enough to the pixel clock for the
+    /// PROM's `waitForBlanking`, which just needs `vt_xy` to move). Once
+    /// `vt_xymax` is programmed the raster cycles: X counts to htotal, then Y
+    /// to vtotal and wraps.
+    pub fn advance(&mut self, delta: u64) {
+        let htotal = (self.vt_xymax & 0xfff) as u16;
+        let vtotal = ((self.vt_xymax >> 12) & 0xfff) as u16;
+        if htotal == 0 || vtotal == 0 {
+            return;
+        }
+        let htotal = htotal as u64;
+        let vtotal = vtotal as u64;
+        let x = self.scan_x as u64 + delta;
+        let lines = x / htotal;
+        self.scan_x = (x % htotal) as u16;
+        self.scan_y = ((self.scan_y as u64 + lines) % vtotal) as u16;
+        self.vt_xy = ((self.scan_y as u32) << 12) | self.scan_x as u32;
+    }
+
+    /// Debug snapshot of display timing/framebuffer registers:
+    /// `(frm_size_tile, frm_size_pixel, frm_control, ovr_width_tile,
+    /// vt_xymax, ctrlstat)`.
+    pub fn regs_dump(&self) -> (u32, u32, u32, u32, u32, u32) {
+        (
+            self.frm_size_tile,
+            self.frm_size_pixel,
+            self.frm_control,
+            self.ovr_width_tile,
+            self.vt_xymax,
+            self.ctrlstat,
+        )
     }
 
     /// Get a color map entry as an (r, g, b) tuple.
     ///
-    /// The GBE color map holds 4608 entries. Each entry is a 32-bit word
-    /// encoding 8-bit RGB (the exact packing is `0x00RRGGBB` big-endian).
+    /// The GBE color map holds 4608 entries; each 32-bit entry packs the
+    /// 8-bit components as `0xRRGGBB00` (see `CrmTpMapColor` in
+    /// crm_tp.c: `cmap[col] = (r << 24) | (g << 16) | (b << 8)`).
     pub fn cmap_entry(&self, index: usize) -> (u8, u8, u8) {
         if index >= self.cmap.len() {
             return (0, 0, 0);
         }
         let v = self.cmap[index];
-        let r = ((v >> 16) & 0xff) as u8;
-        let g = ((v >> 8) & 0xff) as u8;
-        let b = (v & 0xff) as u8;
+        let r = ((v >> 24) & 0xff) as u8;
+        let g = ((v >> 16) & 0xff) as u8;
+        let b = ((v >> 8) & 0xff) as u8;
         (r, g, b)
     }
 }
@@ -1425,10 +1530,13 @@ impl AddressSpace for GbeDisplayEngine {
             a if a == gbe::CRS_START_XY => self.crs_start_xy,
             a if a == gbe::VC_START_XY => self.vc_start_xy,
             a if a == gbe::OVR_WIDTH_TILE => self.ovr_width_tile,
+            a if a == gbe::OVR_INHWCTRL => self.ovr_inhwctrl,
             a if a == gbe::OVR_CONTROL => self.ovr_control,
             a if a == gbe::FRM_SIZE_TILE => self.frm_size_tile,
             a if a == gbe::FRM_SIZE_PIXEL => self.frm_size_pixel,
+            a if a == gbe::FRM_INHWCTRL => self.frm_inhwctrl,
             a if a == gbe::FRM_CONTROL => self.frm_control,
+            a if a == gbe::DID_INHWCTRL => self.did_inhwctrl,
             a if a == gbe::DID_CONTROL => self.did_control,
             a if (gbe::WID_MODE..=gbe::WID_MODE + 124).contains(&a) => {
                 let idx = ((a - gbe::WID_MODE) / 4) as usize;
@@ -1497,11 +1605,25 @@ impl AddressSpace for GbeDisplayEngine {
             a if a == gbe::CRS_START_XY => self.crs_start_xy = value,
             a if a == gbe::VC_START_XY => self.vc_start_xy = value,
             a if a == gbe::OVR_WIDTH_TILE => self.ovr_width_tile = value,
-            a if a == gbe::OVR_CONTROL => self.ovr_control = value,
+            a if a == gbe::OVR_CONTROL => {
+                self.ovr_control = value;
+                // The GBE latches control words into its in-hardware shadow
+                // when the DMA engine picks them up; software polls
+                // `*_inhwctrl` waiting for the new value (see `turnOnGbe` /
+                // `turnOffGbe` in `crm_init.c`), so mirror immediately.
+                self.ovr_inhwctrl = value;
+            }
             a if a == gbe::FRM_SIZE_TILE => self.frm_size_tile = value,
             a if a == gbe::FRM_SIZE_PIXEL => self.frm_size_pixel = value,
-            a if a == gbe::FRM_CONTROL => self.frm_control = value,
-            a if a == gbe::DID_CONTROL => self.did_control = value,
+            a if a == gbe::FRM_CONTROL => {
+                self.frm_control = value;
+                // Mirror into the in-hardware shadow (see OVR_CONTROL).
+                self.frm_inhwctrl = value;
+            }
+            a if a == gbe::DID_CONTROL => {
+                self.did_control = value;
+                self.did_inhwctrl = value;
+            }
             a if (gbe::WID_MODE..=gbe::WID_MODE + 124).contains(&a) => {
                 let idx = ((a - gbe::WID_MODE) / 4) as usize;
                 if idx < 32 { self.wid_mode[idx] = value; }
@@ -1594,5 +1716,174 @@ impl Graphics {
     /// Get the framebuffer depth (bits per pixel).
     pub fn depth(&self) -> u32 {
         self.gbe.depth()
+    }
+}
+// ============================================================================
+// Render Engine rasterizer (subset)
+// ============================================================================
+//
+// The IP32 PROM's graphics console (libsk `graphics/CRIME/crm_tp.c`,
+// `crm_init.c`) issues CRIME Render Engine primitives: framebuffer clears are
+// filled RECTs (`PRIM_OPCODE_RECT`), glyph cells are zero-width stippled
+// LINEs (`CrmTpDrawbitmap`), and the regime ends with a write to the
+// "go" register `CRM_PIXPIPE_NULL_REG` (pixpipe page, offset 0x21f0).
+//
+// Pixel addressing follows the GBE tile layout: the framebuffer is made of
+// 64KiB tiles in main memory whose physical bases come from the 16-bit tile
+// descriptor list pointed at by `GBE FRM_CONTROL.FRM_TILE_PTR`
+// (`initFramebuffer` in crm_init.c); a tile is 512 bytes wide * 128 lines
+// tall, row-major.
+
+use crate::memory::physical::PhysicalMemory;
+use crate::memory::AddressSpace as _MemAs;
+
+impl RenderEngine {
+    /// Raw offset (within the RE window) of the `CRM_PIXPIPE_NULL_REG` "go"
+    /// register in the *start space*: `crmSetAndGo` writes registers through
+    /// `addr | CRM_START_OFFSET` (= +0x800, `crimedef.h`), executing the
+    /// pending primitive immediately. Normal-space `CRM_PIXPIPE_NULL_REG` is
+    /// at 0x21f0; its start-space alias is 0x29f0.
+    pub const GO_OFFSET: u32 = 0x2000 + 0x1f0 + 0x800;
+
+    /// Enqueue nothing / flush — the RE is emulated synchronously, so a
+    /// pipeline flush is always complete ("busy" bits clear).
+    fn reflush(&mut self) {
+        self.status |= 0x3;
+    }
+
+    /// Framebuffer pixel plot: tile-map (x, y) to a physical byte address via
+    /// the GBE tile descriptor list and write `color` at the current depth.
+    fn plot(&mut self, gbe: &GbeDisplayEngine, ram: &mut PhysicalMemory, x: i32, y: i32) {
+        self.raster_stats.1 += 1;
+        let depth = gbe.depth() as usize; // 0=8bpp, 1=16bpp, 2=32bpp
+        let width = gbe.width() as i32;
+        let height = gbe.height() as i32;
+        if width == 0 || height == 0 || x < 0 || y < 0 || x >= width || y >= height {
+            return;
+        }
+        let tile_list = gbe.tile_list_ptr();
+        if tile_list == 0 {
+            return;
+        }
+
+
+
+        let bpp = 1u32 << depth;
+        let tile_px_x = 512u32 >> depth; // 512B-wide tiles
+        let tx = x as u32 / tile_px_x;
+        let ty = (y as u32) >> 7;
+        // Tiles per row includes a partial right-hand-side tile when the
+        // programmed width is not a whole number of tiles.
+        let tiles_per_row = (width as u32).div_ceil(tile_px_x);
+        let entry_off = tile_list + (ty * tiles_per_row + tx) * 2;
+        if entry_off + 2 > ram.len() as u32 {
+            return;
+        }
+        let tile_phys = (ram.read16(entry_off) as u32) << 16;
+        if tile_phys == 0 {
+            return;
+        }
+        let in_tile = ((y as u32) & 0x7f) * 512 + ((x as u32) % tile_px_x) * bpp;
+        let addr = tile_phys + in_tile;
+
+        let fg = self.shade[0];
+        match depth {
+            0 => ram.write8(addr, fg as u8),
+            1 => {
+                // RGB565 from the fg color's R8G8B8A8 packing, big-endian.
+                let (r, g, b) = ((fg >> 24) & 0xff, (fg >> 16) & 0xff, (fg >> 8) & 0xff);
+                let p = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+                let _ = (r, g, b);
+                ram.write16(addr, ((r >> 3) << 11 | (g >> 2) << 5 | (b >> 3)) as u16);
+                let _ = p;
+            }
+            _ => ram.write32(addr, fg),
+        }
+    }
+
+    /// Execute the pending primitive into the framebuffer.
+    ///
+    /// Required geometry state is taken from the register file: `primitive`
+    /// selects the opcode (`CRM_OPCODE_*`), `vertex_x[]` the packed
+    /// (x << 16) | y endpoints, `shade[0]` the foreground color, and
+    /// `stipple`/`stipple_pattern` the line stipple state
+    /// (`STIPPLE_INDEX`/`MAX_INDEX` fields per `crimedef.h`).
+    pub fn rasterize(&mut self, gbe: &GbeDisplayEngine, ram: &mut PhysicalMemory) {
+        let opcode = (self.primitive >> 24) & 0xff;
+        *self.raster_stats.0.entry(opcode).or_insert(0) += 1;
+        let vx = |i: usize| {
+            let v = self.vertex_x[i];
+            ((v >> 16) as i16 as i32, v as i16 as i32)
+        };
+        match opcode {
+            // CRM_OPCODE_POINT
+            0 => {
+                let (x, y) = vx(0);
+                self.plot(gbe, ram, x, y);
+            }
+            // CRM_OPCODE_LINE (zero-width)
+            1 => {
+                let (mut x0, mut y0) = vx(0);
+                let (x1, y1) = vx(1);
+                let stippled = self.draw_mode & (1 << 19) != 0; // DM_ENLINESTIPPLE
+                let stipple_index = (self.stipple >> 24) & 0xff;
+                let stipple_max = (self.stipple >> 16) & 0xff;
+                let span = if stipple_max >= stipple_index {
+                    stipple_max + 1 - stipple_index
+                } else {
+                    32
+                };
+                // Bresenham from (x0,y0) to (x1,y1), stipple advancing per
+                // pixel along the major axis.
+                let dx = (x1 - x0).abs();
+                let dy = (y1 - y0).abs();
+                let sx = if x0 < x1 { 1 } else { -1 };
+                let sy = if y0 < y1 { 1 } else { -1 };
+                let mut err = dx - dy;
+                let mut i = 0u32;
+                loop {
+                    let draw = !stippled
+                        || {
+                            // Stipple bits run MSB-first: bit 31 - index is
+                            // the leftmost screen pixel (see the STIPPLE_INDEX
+                            // handling in CrmTpDrawbitmap).
+                            let bit_idx = (stipple_index + (i % span.max(1))) & 31;
+                            (self.stipple_pattern >> (31 - bit_idx)) & 1 == 1
+                        };
+                    if draw {
+                        self.plot(gbe, ram, x0, y0);
+                    }
+                    i += 1;
+                    if x0 == x1 && y0 == y1 {
+                        break;
+                    }
+                    let e2 = 2 * err;
+                    if e2 > -dy {
+                        err -= dy;
+                        x0 += sx;
+                    }
+                    if e2 < dx {
+                        err += dx;
+                        y0 += sy;
+                    }
+                }
+            }
+            // CRM_OPCODE_RECT — filled rectangle between the two vertices.
+            3 => {
+                let (x0, y0) = vx(0);
+                let (x1, y1) = vx(1);
+                let (xa, xb) = (x0.min(x1), x0.max(x1));
+                let (ya, yb) = (y0.min(y1), y0.max(y1));
+                for y in ya..=yb {
+                    for x in xa..=xb {
+                        self.plot(gbe, ram, x, y);
+                    }
+                }
+            }
+            // CRM_OPCODE_FLUSH and anything else (TRI, pixel transfers):
+            // complete immediately.
+            _ => {}
+        }
+        self.reflush();
     }
 }
