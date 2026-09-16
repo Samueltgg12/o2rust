@@ -1224,7 +1224,11 @@ impl R5000 {
                 let aligned = addr & !3;
                 let word = mem.read32(aligned);
                 let shift = (addr & 3) * 8;
-                let mask = 0xffff_ffffu32 << (32 - shift);
+                let mask = if shift == 0 {
+                    0xffff_ffffu32
+                } else {
+                    0xffff_ffffu32 << (32 - shift)
+                };
                 let merged = (word & !mask) | ((self.state.gpr(rt) as u32) & mask);
                 mem.write32(aligned, merged);
             }
@@ -1232,7 +1236,11 @@ impl R5000 {
                 let aligned = addr & !7;
                 let dword = mem.read64(aligned);
                 let shift = (addr & 7) * 8;
-                let mask = 0xffff_ffff_ffff_ffffu64 << (64 - shift);
+                let mask = if shift == 0 {
+                    0xffff_ffff_ffff_ffffu64
+                } else {
+                    0xffff_ffff_ffff_ffffu64 << (64 - shift)
+                };
                 let merged = (dword & !mask) | (self.state.gpr(rt) & mask);
                 mem.write64(aligned, merged);
             }
@@ -1240,7 +1248,11 @@ impl R5000 {
                 let aligned = addr & !3;
                 let word = mem.read32(aligned);
                 let shift = (addr & 3) * 8;
-                let mask = 0xffff_ffffu32 << (32 - shift);
+                let mask = if shift == 0 {
+                    0xffff_ffffu32
+                } else {
+                    0xffff_ffffu32 << (32 - shift)
+                };
                 let merged = (word & !mask) | ((self.state.gpr(rt) as u32) & mask);
                 mem.write32(aligned, merged);
             }
@@ -1258,7 +1270,11 @@ impl R5000 {
                 let aligned = addr & !3;
                 let word = mem.read32(aligned);
                 let shift = (3 - (addr & 3)) * 8;
-                let mask = 0xffff_ffffu32 >> (32 - shift);
+                let mask = if shift == 0 {
+                    0xffff_ffffu32
+                } else {
+                    0xffff_ffffu32 >> (32 - shift)
+                };
                 let merged = (word & !mask) | ((self.state.gpr(rt) as u32) & mask);
                 mem.write32(aligned, merged);
             }
@@ -1266,7 +1282,11 @@ impl R5000 {
                 let aligned = addr & !7;
                 let dword = mem.read64(aligned);
                 let shift = (7 - (addr & 7)) * 8;
-                let mask = 0xffff_ffff_ffff_ffffu64 >> (64 - shift);
+                let mask = if shift == 0 {
+                    0xffff_ffff_ffff_ffffu64
+                } else {
+                    0xffff_ffff_ffff_ffffu64 >> (64 - shift)
+                };
                 let merged = (dword & !mask) | (self.state.gpr(rt) & mask);
                 mem.write64(aligned, merged);
             }
@@ -1274,7 +1294,11 @@ impl R5000 {
                 let aligned = addr & !3;
                 let word = mem.read32(aligned);
                 let shift = (3 - (addr & 3)) * 8;
-                let mask = 0xffff_ffffu32 >> (32 - shift);
+                let mask = if shift == 0 {
+                    0xffff_ffffu32
+                } else {
+                    0xffff_ffffu32 >> (32 - shift)
+                };
                 let merged = (word & !mask) | ((self.state.gpr(rt) as u32) & mask);
                 mem.write32(aligned, merged);
             }
@@ -1379,13 +1403,19 @@ impl R5000 {
                 let v = self.cp0.read(reg_from_index(rd));
                 self.state.set_gpr(rt, v as u64);
             }
+            0x01 => {
+                // MTC0 - Move To Coprocessor 0 (R5000 canonical encoding;
+                // rs=0x04 below is the older/R3000-style alias)
+                let v = self.state.gpr(rt) as u32;
+                self.cp0.write(reg_from_index(rd), v);
+            }
             0x02 => {
                 // CFC0 - Move Control From Coprocessor 0 (same as MFC0 for R5000)
                 let v = self.cp0.read(reg_from_index(rd));
                 self.state.set_gpr(rt, v as u64);
             }
             0x04 => {
-                // MTC0 - Move To Coprocessor 0
+                // MTC0 - Move To Coprocessor 0 (R3000-style alias of 0x01)
                 let v = self.state.gpr(rt) as u32;
                 self.cp0.write(reg_from_index(rd), v);
             }
@@ -2086,6 +2116,27 @@ mod tests {
 
         cpu.step(&mut mem);
         assert_eq!(cpu.state.gpr(9), 0x5678_0000);
+        assert_eq!(cpu.state.pc, 0x1008);
+    }
+
+    #[test]
+    fn mtc0_rs1_writes_and_mfc0_reads() {
+        let mut cpu = R5000::new();
+        let mut mem = TestMem::new(0x2000);
+        cpu.state.pc = 0x1000;
+        cpu.state.set_gpr(8, 0xdead_beef_u64 << 32 | 0x1234_5678); // $t0
+
+        // MTC0 $t0, $11 (Compare, rs=1)  => 0x4028_5800
+        // MFC0 $t1, $11 (rs=0)           => 0x4009_5800
+        mem.write32(0x1000, 0x4028_5800);
+        mem.write32(0x1004, 0x4009_5800);
+
+        cpu.step(&mut mem);
+        assert_eq!(cpu.cp0.read(Cp0Reg::Compare), 0x1234_5678);
+        assert_eq!(cpu.state.pc, 0x1004);
+
+        cpu.step(&mut mem);
+        assert_eq!(cpu.state.gpr(9), 0x1234_5678);
         assert_eq!(cpu.state.pc, 0x1008);
     }
 

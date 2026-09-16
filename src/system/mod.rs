@@ -207,6 +207,23 @@ impl Emulator {
         self.memory.audio_tick(delta);
         self.memory.mace_advance_ust(delta);
         self.memory.gbe.advance(delta);
+        // Run the AIC-7880 sequencers against the emulated RAM so guest SCSI
+        // activity (downloaded firmware, SCB fetch, data DMA) progresses while
+        // the CPU runs. The two controllers' SCB/data windows share the RAM.
+        {
+            let ram = &mut self.memory.ram;
+            let mut host = crate::memory::AhcHostRam(ram);
+            self.memory.mace.ahc0.advance_cycles(delta, &mut host);
+            self.memory.mace.ahc1.advance_cycles(delta, &mut host);
+        }
+        // CRIME presents all device interrupts (MACE PCI SCSI lines, GBE,
+        // RE, memory/CPU errors) on CPU hardware interrupt IP0. Sample the
+        // I/O interrupt outputs through MACE and drive IP0 accordingly.
+        if self.memory.sync_pci_interrupts() != 0 {
+            self.cpu.cp0.raise_interrupt(0);
+        } else {
+            self.cpu.cp0.clear_interrupt(0);
+        }
         self.check_crime_reset();
     }
 
@@ -338,9 +355,10 @@ impl Emulator {
         Ok(())
     }
 
-    /// Mount a device as the internal **CD-ROM**: SCSI1 (ahc1), target 6.
+    /// Mount a device as the internal **CD-ROM**: SCSI0 (ahc0), target 4,
+    /// matching the physical drive on the original O2 motherboard.
     pub fn mount_cdrom(&mut self, device: Box<dyn BlockDevice>) -> anyhow::Result<()> {
-        Self::mount_scsi(&mut self.memory.mace.ahc1.bus, "SCSI1", SCSI_TARGET_CDROM, device, "CD-ROM")?;
+        Self::mount_scsi(&mut self.memory.mace.ahc0.bus, "SCSI0", SCSI_TARGET_CDROM, device, "CD-ROM")?;
         self.scsi_unimplemented_trace();
         Ok(())
     }
@@ -366,7 +384,7 @@ impl Emulator {
     }
 
     fn scsi_unimplemented_trace(&self) {
-        log::debug_msg("SCSI: attach registers, PCI config, and CDB target engine emulated; sequencer interpreter + DMA engine pending");
+        log::debug_msg("SCSI: attach registers, PCI config, CDB target engine, sequencer interpreter, and DMA engine emulated");
     }
 
     /// The name of the attached hard disk, if any (SCSI0 target 1).
@@ -379,11 +397,11 @@ impl Emulator {
             .map(|info| info.name)
     }
 
-    /// The name of the attached CD-ROM, if any (SCSI1 target 6).
+    /// The name of the attached CD-ROM, if any (SCSI0 target 4).
     pub fn cdrom_name(&self) -> Option<String> {
         self.memory
             .mace
-            .ahc1
+            .ahc0
             .bus
             .device_info(SCSI_TARGET_CDROM)
             .map(|info| info.name)
@@ -392,6 +410,12 @@ impl Emulator {
     /// Take the host side of the MACE audio output ring for the front-end.
     pub fn take_audio_consumer(&mut self) -> Option<rtrb::Consumer<f32>> {
         self.memory.mace.take_audio_consumer()
+    }
+
+    /// The emulated codec's current output sample rate (Hz), which the
+    /// front-end uses to anchor playback pitch regardless of emulator speed.
+    pub fn audio_sample_rate(&self) -> f64 {
+        self.memory.mace.perif.audio.sample_rate
     }
 
     // === Keyboard / mouse input ===
@@ -416,5 +440,57 @@ impl Emulator {
     /// Flush queued keyboard/mouse input (used by front-ends on focus loss).
     pub fn flush_input(&mut self) {
         self.memory.mace.perif.kbdms.clear_input();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::io::ahc::{CLRINT, HCNTRL, HCNTRL_INTEN, INTSTAT, INTSTAT_CMDCMPLT};
+    use crate::memory::AddressSpace as _;
+    use crate::storage::tests::MemDisk;
+    use std::sync::{Arc, Mutex};
+
+    /// Drive the full SCSI interrupt chain: AIC-7880 INT# -> MACE PCI ->
+    /// CRIME intstat -> CPU IP0, and back down after a CLRINT.
+    #[test]
+    fn scsi_interrupt_chain_raises_and_releases_cpu_ip0() {
+        let mut emu = Emulator::with_ram_no_console(16);
+        let dev = MemDisk {
+            name: "t.img".into(),
+            data: Arc::new(Mutex::new(vec![0u8; 512 * 32])),
+            sector_size: 512,
+        };
+        emu.mount_hard_disk(Box::new(dev)).unwrap();
+
+        // Nothing pending yet: CRM SCSI0 bit + CPU IP0 both clear.
+        assert_eq!(emu.memory.sync_pci_interrupts(), 0);
+        let before = emu.cpu.cycles();
+        emu.tick_devices(before);
+        assert_eq!(emu.cpu.cp0.pending_interrupts() & 0x01, 0);
+
+        // Guest enables CRIME's SCSI0 mask (CRM_INTMASK bit 8) and the AIC
+        // interrupt output (ahc_intr_enable(ahc, 1)).
+        emu.memory
+            .crime_cpu
+            .write32(crate::graphics::crime_cpu::CRM_INTMASK, 1 << crate::io::pci::IRQ_SCSI0);
+        emu.memory.mace.ahc0.write8(HCNTRL, HCNTRL_INTEN);
+
+        // A completed command latches INTSTAT => chip drives INT# low.
+        emu.memory.mace.ahc0.write8(INTSTAT, INTSTAT_CMDCMPLT);
+
+        // MACE routes SCSI0's INT# to CRIME interrupt line 8.
+        let pending = emu.memory.sync_pci_interrupts();
+        assert_ne!(pending & (1 << crate::io::pci::IRQ_SCSI0), 0);
+
+        // CRIME presents it on CPU IP0 each device tick.
+        emu.tick_devices(before);
+        assert_ne!(emu.cpu.cp0.pending_interrupts() & 0x01, 0, "CPU IP0 asserted");
+
+        // Guest services the interrupt: a CLRINT write deasserts the chain.
+        emu.memory.mace.ahc0.write8(CLRINT, INTSTAT_CMDCMPLT);
+        assert_eq!(emu.memory.sync_pci_interrupts(), 0);
+        emu.tick_devices(before);
+        assert_eq!(emu.cpu.cp0.pending_interrupts() & 0x01, 0, "CPU IP0 released");
     }
 }

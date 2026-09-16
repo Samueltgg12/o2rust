@@ -14,8 +14,36 @@ pub mod physical;
 pub use cache::DCache;
 
 use crate::graphics::{CrimeCpuInterface, GbeDisplayEngine, Ice, RenderEngine};
+use crate::io::ahc::HostMemory;
 use crate::io::Mace;
 use crate::ip32;
+
+/// Host-memory bridge for the AIC-7880 DMA engine.
+///
+/// On the O2 (UMA) PCI masters address CPU physical memory directly, so the
+/// sequencer's SCB / data DMA lands in [`PhysicalMemory`] at the bus
+/// addresses the guest driver programs into HADDR. Out-of-range accesses read
+/// zero / are dropped, mirroring `PhysicalMemory`'s own semantics.
+pub struct AhcHostRam<'a>(pub &'a mut physical::PhysicalMemory);
+
+impl HostMemory for AhcHostRam<'_> {
+    // AIC-7880 DMA addresses carry the MACE view bits in the top nibble:
+    // 0x4000_0000 = PCI_NATIVE_VIEW. Mask them off to reach physical RAM.
+    fn byte_read(&mut self, addr: u32) -> u8 {
+        let a = addr & 0x3FFF_FFFF;
+        if (a as usize) < self.0.len() {
+            self.0.read8(a)
+        } else {
+            0
+        }
+    }
+    fn byte_write(&mut self, addr: u32, value: u8) {
+        let a = addr & 0x3FFF_FFFF;
+        if (a as usize) < self.0.len() {
+            self.0.write8(a, value);
+        }
+    }
+}
 
 /// A region of the physical address space that can be read from and written
 /// to. Devices (CRIME, MACE, GBE, PROM) implement this trait.
@@ -223,11 +251,14 @@ impl MemoryMap {
     /// (GBE spec §2.10). `crm_cursor` (see crm_cursor.c) fills the top-left
     /// 16×16 quadrant with the arrow; the remaining words are zero.
     ///
-    /// Pixels within a word are LSB-first: bit pair `(2c, 2c+1)` is pixel
-    /// column `c`, and value 1 = `crs_cmap[0]`, 2 = `crs_cmap[1]`,
-    /// 3 = `crs_cmap[2]`. initCursor only programs cmap[0]=white and
-    /// cmap[1]=red (crm_init.c), and the arrow uses exactly values 1 and 2 —
-    /// a red body with a white outline. `crs_pos` is the glyph's upper-left
+    /// Pixels within a word are MSB-first: the bit pair `(2c, 2c+1)` counted
+    /// from bit 30 down is pixel column `c` (confirmed against the PROM's
+    /// `crm_cursor.c` bitmap, whose left-pointing arrow only decodes with this
+    /// order; an LSB-first read renders the glyph mirrored), and value 1 =
+    /// `crs_cmap[0]`, 2 = `crs_cmap[1]`, 3 = `crs_cmap[2]`. initCursor only
+    /// programs cmap[0]=white and cmap[1]=red (crm_init.c), and the arrow
+    /// uses exactly values 1 and 2 — a red body with a white outline.
+    /// `crs_pos` is the glyph's upper-left
     /// corner in screen (scanline) coordinates; `out` is in RE order
     /// (row 0 = guest bottom scanline), so the overlay row must be
     /// `height-1-(cy+row)` to appear at the correct guest scanline.
@@ -247,8 +278,9 @@ impl MemoryMap {
                     if x < 0 || x >= width as i64 {
                         continue;
                     }
-                    // LSB-first 2bpp: pixel col = bits (2c, 2c+1).
-                    let p = (word >> (2 * col as u32)) & 3;
+                    // MSB-first 2bpp: pixel col = bits (2c, 2c+1) from bit 30.
+                    let bit = 30 - 2 * col as u32;
+                    let p = (word >> bit) & 3;
                     if p == 0 {
                         continue;
                     }
@@ -498,6 +530,18 @@ impl MemoryMap {
     /// counter passes a deadline). See [`UstMscState::advance`].
     pub fn mace_advance_ust(&mut self, delta: u64) {
         self.mace.perif.ustmsc.advance(delta);
+    }
+
+    /// Refresh CRIME's interrupt status from the I/O side and expose the
+    /// pending (unmasked) interrupt set.
+    ///
+    /// MACE PCI routes the two AIC-7880 INT# outputs to CRIME lines 8/9;
+    /// this samples them so CRIME's `istat` always reflects the gadget
+    /// states. Returns `istat & imask`, i.e. what CRIME would present to the
+    /// CPU on IP0.
+    pub fn sync_pci_interrupts(&mut self) -> u32 {
+        self.mace.update_pci_interrupts(&mut self.crime_cpu);
+        self.crime_cpu.interrupt_status()
     }
 
     /// Advance the MACE audio DMA by `delta` CRIME ticks (nominally one ~133

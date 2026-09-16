@@ -133,6 +133,14 @@ pub mod enet {
     pub const MII_DATA: u32 = 0x0044;  // MII data
     pub const MII_ADDR: u32 = 0x0048;  // MII address
 
+    // MDIO PHY management (64-bit regs; the PROM/`if_me` driver touch the +4
+    // dwords at 0x64/0x6C/0x74 — see docs/register-maps.md "PHY (MDIO)"). The
+    // emulated transceiver is a National DP83840 on MII device address 0.
+    pub const PHY_DATA: u32 = 0x60;          // bits 15:0 data, bit 16 MDIO busy
+    pub const PHY_ADDRESS: u32 = 0x68;       // bits 4:0 reg, bits 9:5 device
+    pub const PHY_READ_INITIATE: u32 = 0x70; // write to start a PHY read
+    pub const PHY_BACKOFF: u32 = 0x78;       // PHY backoff (benign)
+
     // Statistics
     pub const STATS_BASE: u32 = 0x0100; // Statistics counters base
 }
@@ -193,6 +201,12 @@ pub mod perif {
         pub const MISC_CONTROL: u32 = 0x08;  // LED / flash write-enable
         pub const INT_STATUS: u32 = 0x10;    // interrupt status
         pub const INT_MASK: u32 = 0x18;      // interrupt mask
+
+        // Serial DMA registers (TL16550.h).  Each channel occupies 8 x u64
+        // (txCont/txRead/txWrite/txDepth/rxCont/rxRead/rxWrite/rxDepth).
+        pub const SERIAL_A_DMA: u32 = 0x8000;
+        pub const SERIAL_B_DMA: u32 = 0xC000;
+        pub const SERIAL_DMA_REGS: u32 = 0x40; // 8 x u64
     }
 
     // Keyboard/Mouse (PS/2) - offset 0x20000
@@ -422,6 +436,29 @@ impl Mace {
         *self = Self::new();
     }
 
+    /// Sample the onboard AIC-7880 interrupt outputs and drive the
+    /// corresponding CRIME interrupt status bits.
+    ///
+    /// MACE sits between the PCI devices and CRIME: it routes SCSI0's INTA#
+    /// to CRIME interrupt line 8 and SCSI1's INTA# to line 9 (Linux
+    /// `arch/mips/sgi-ip32/ip32-irq.c`, MACE PCI control bits).  A device
+    /// INT# staying asserted keeps its CRIME status bit level-set until the
+    /// guest clears the source (a CLRINT write to the AIC-7880).
+    pub fn update_pci_interrupts(&mut self, crime: &mut crate::graphics::CrimeCpuInterface) {
+        let s0 = self.ahc0.int_out();
+        let s1 = self.ahc1.int_out();
+        if s0 {
+            crime.assert_interrupt(1 << pci::IRQ_SCSI0);
+        } else {
+            crime.clear_interrupt(1 << pci::IRQ_SCSI0);
+        }
+        if s1 {
+            crime.assert_interrupt(1 << pci::IRQ_SCSI1);
+        } else {
+            crime.clear_interrupt(1 << pci::IRQ_SCSI1);
+        }
+    }
+
     /// Read a 32-bit register from MACE.
     pub fn read32(&mut self, offset: u32) -> u32 {
         match offset {
@@ -518,7 +555,10 @@ impl Mace {
     /// PCI memory-window access (0x1A000000..0x1BFFFFFF), routed by BAR0.
     pub fn pci_window_read8(&mut self, addr: u32) -> u8 {
         match self.pci_window_target_mut(addr) {
-            Some((ctrl, off)) => ctrl.read8(off),
+            // The AIC-7880 is little-endian; the MACE steers byte lanes so a
+            // big-endian CPU byte access at `off` reaches the device byte at
+            // `off ^ 3` (cf. the MIPS_BE register map in him_equ.h).
+            Some((ctrl, off)) => ctrl.read8(off ^ 3),
             None => {
                 log::warn!("PCI window read8: nothing claims {:#010X}", addr);
                 0xFF
@@ -530,12 +570,14 @@ impl Mace {
     pub fn pci_window_read32(&mut self, addr: u32) -> u32 {
         match self.pci_window_target_mut(addr) {
             Some((ctrl, off)) => {
-                // Controller registers byte-addressable; wide reads assemble
-                // the big-endian word exactly like the MACE config lanes.
-                (ctrl.read8(off) as u32) << 24
-                    | (ctrl.read8(off + 1) as u32) << 16
-                    | (ctrl.read8(off + 2) as u32) << 8
-                    | ctrl.read8(off + 3) as u32
+                // 32-bit lane steering: CPU value = byte-swapped device dword.
+                u32::from_le_bytes([
+                    ctrl.read8(off),
+                    ctrl.read8(off + 1),
+                    ctrl.read8(off + 2),
+                    ctrl.read8(off + 3),
+                ])
+                .swap_bytes()
             }
             None => 0xFFFF_FFFF,
         }
@@ -544,7 +586,7 @@ impl Mace {
     /// PCI memory-window write (0x1A000000..0x1BFFFFFF), routed by BAR0.
     pub fn pci_window_write8(&mut self, addr: u32, value: u8) {
         match self.pci_window_target_mut(addr) {
-            Some((ctrl, off)) => ctrl.write8(off, value),
+            Some((ctrl, off)) => ctrl.write8(off ^ 3, value),
             None => log::warn!("PCI window write8: nothing claims {:#010X} = 0x{:02X}", addr, value),
         }
     }
@@ -552,8 +594,10 @@ impl Mace {
     /// PCI memory-window read16 (big-endian lane assembled over 2 bytes).
     pub fn pci_window_read16(&mut self, addr: u32) -> u16 {
         match self.pci_window_target_mut(addr) {
+            // 16-bit lane steering: halfword at off ^ 2, value preserved.
             Some((ctrl, off)) => {
-                ((ctrl.read8(off) as u16) << 8) | ctrl.read8(off + 1) as u16
+                let o = off ^ 2;
+                u16::from_le_bytes([ctrl.read8(o), ctrl.read8(o + 1)])
             }
             None => 0xFFFF,
         }
@@ -562,8 +606,10 @@ impl Mace {
     /// PCI memory-window write16 (big-endian lane split over 2 bytes).
     pub fn pci_window_write16(&mut self, addr: u32, value: u16) {
         if let Some((ctrl, off)) = self.pci_window_target_mut(addr) {
-            ctrl.write8(off, (value >> 8) as u8);
-            ctrl.write8(off + 1, value as u8);
+            let o = off ^ 2;
+            let b = value.to_le_bytes();
+            ctrl.write8(o, b[0]);
+            ctrl.write8(o + 1, b[1]);
         } else {
             log::warn!("PCI window write16: nothing claims {:#010X} = 0x{:04X}", addr, value);
         }
@@ -572,10 +618,11 @@ impl Mace {
     /// PCI memory-window write32 (big-endian lane split over 4 bytes).
     pub fn pci_window_write32(&mut self, addr: u32, value: u32) {
         if let Some((ctrl, off)) = self.pci_window_target_mut(addr) {
-            ctrl.write8(off, (value >> 24) as u8);
-            ctrl.write8(off + 1, (value >> 16) as u8);
-            ctrl.write8(off + 2, (value >> 8) as u8);
-            ctrl.write8(off + 3, value as u8);
+            let b = value.swap_bytes().to_le_bytes();
+            ctrl.write8(off, b[0]);
+            ctrl.write8(off + 1, b[1]);
+            ctrl.write8(off + 2, b[2]);
+            ctrl.write8(off + 3, b[3]);
         } else {
             log::warn!("PCI window write32: nothing claims {:#010X} = 0x{:08X}", addr, value);
         }
@@ -880,13 +927,23 @@ impl PciState {
 
     /// Route a PCI memory-window access to the function claiming `addr`
     /// through BAR0, masking to the controller's 256-byte window.
+    ///
+    /// The MACE decodes device registers within its PCI windows by *bus
+    /// offset*, not by CPU physical address: drivers (both the IP32 PROM
+    /// `pci_intf.c` and Linux; see `MACE_PCI_MEM_OFFSET = PCI_LOW_MEMORY -
+    /// 0x8000_0000` in `pci-ip32.c`) program BAR0 with a window-relative
+    /// address ORed with the PCI_IO flag (bit 31).  Both low windows
+    /// (I/O at 0x1800_0000, memory at 0x1A00_0000) are 32 MB apart, so the
+    /// low 25 bits of the CPU address equal the bus offset in either window.
     pub fn bar_target(&self, addr: u32) -> Option<(usize, u32)> {
+        let offset = addr & 0x01FF_FFFF;
         (0..32)
             .filter(|&i| self.functions[i].present)
             .find_map(|i| {
-                let bar = self.functions[i].bar0();
-                if bar != 0 && (addr >= bar && addr < bar + 0x100) {
-                    Some((i, addr - bar))
+                let raw = self.functions[i].bar0();
+                let bar = raw & 0x7FFF_FF00;
+                if raw != 0 && offset >= bar && offset < bar + 0x100 {
+                    Some((i, offset - bar))
                 } else {
                     None
                 }
@@ -914,11 +971,80 @@ pub struct EnetState {
     pub mii_ctrl: u32,
     pub mii_data: u32,
     pub mii_addr: u32,
+    // MDIO PHY management (MEC_PHY_*). Both dword lanes of each 64-bit
+    // register are aliased (0x60/0x64, 0x68/0x6C, 0x70/0x74).
+    pub phy_data: u32,       // PHY_DATA: bits 15:0 data, bit 16 MDIO busy
+    pub phy_address: u32,    // PHY_ADDRESS: bits 4:0 reg, bits 9:5 device
+    pub phy_read_start: u32, // PHY_READ_INITIATE latch
+    // Emulated DP83840 register file.
+    pub phy_ctrl: u32,      // MII reg 0 (control)
+    pub phy_advertise: u32, // MII reg 4 (advertise)
     // Statistics counters (simplified)
     pub stats: [u32; 32],
 }
 
+/// MDIO transactions complete instantly (the guest always polls through a
+/// `us_delay`, so the busy flag in `MEC_PHY_DATA` is never left set).
+
+/// Emulated onboard transceiver: National DP83840 at MII device 0.
+/// Status reports auto-negotiation complete + link up on 100Base-TX full and
+/// half duplex (matches `mace_ether_mdio_rd` link polling in if_me.c).
+const PHY_DEVICE: u32 = 0;
+const PHY_ID_HI: u16 = 0x2000; // DP83840 OUI (matches if_me.h `PHY_DP83840`)
+const PHY_ID_LO: u16 = 0x05C0;
+const PHY_STATUS: u16 = 0x796D;
+const PHY_AN_PARTNER: u16 = 0x01E1;
+const PHY_AN_EXPANSION: u16 = 0x0001;
+
 impl EnetState {
+    /// Read one MII register of the emulated PHY.
+    fn phy_reg_read(&self, reg: u16) -> u16 {
+        match reg {
+            0 => self.phy_ctrl as u16,
+            1 => PHY_STATUS,
+            2 => PHY_ID_HI,
+            3 => PHY_ID_LO,
+            4 => self.phy_advertise as u16,
+            5 => PHY_AN_PARTNER,
+            6 => PHY_AN_EXPANSION,
+            _ => 0,
+        }
+    }
+
+    /// Write one MII register of the emulated PHY. Soft reset and auto-negotia-
+    /// tion restart bits fold back to the reset defaults (link stays up).
+    fn phy_reg_write(&mut self, reg: u16, val: u16) {
+        match reg {
+            0 => self.phy_ctrl = if val & 0x8000 != 0 { 0x1000 } else { (val & 0x1FFF) as u32 },
+            4 => self.phy_advertise = val as u32,
+            _ => {}
+        }
+    }
+
+    /// Writing the PHY data register performs an MDIO write of `val` to the
+    /// register/device latched in `phy_address` and latches `val` for the
+    /// guest's completion poll.
+    fn mdio_write_data(&mut self, val: u32) {
+        let reg = (self.phy_address & 0x1F) as u16;
+        let dev = (self.phy_address >> 5) & 0x1F;
+        if dev == PHY_DEVICE {
+            self.phy_reg_write(reg, (val & 0xFFFF) as u16);
+        }
+        self.phy_data = val & 0xFFFF;
+    }
+
+    /// Write to PHY_READ_INITIATE performs the MDIO read; the result is
+    /// latched into `phy_data` for the guest's completion poll.
+    fn mdio_initiate_read(&mut self) {
+        let reg = (self.phy_address & 0x1F) as u16;
+        let dev = (self.phy_address >> 5) & 0x1F;
+        self.phy_data = if dev == PHY_DEVICE {
+            self.phy_reg_read(reg) as u32
+        } else {
+            0
+        };
+    }
+
     pub fn read32(&self, offset: u32) -> u32 {
         match offset {
             enet::CTRL => self.ctrl,
@@ -938,6 +1064,14 @@ impl EnetState {
             enet::MII_CTRL => self.mii_ctrl,
             enet::MII_DATA => self.mii_data,
             enet::MII_ADDR => self.mii_addr,
+            enet::PHY_DATA => self.phy_data,
+            o if o == enet::PHY_DATA + 4 => self.phy_data,
+            enet::PHY_ADDRESS => self.phy_address,
+            o if o == enet::PHY_ADDRESS + 4 => self.phy_address,
+            enet::PHY_READ_INITIATE => 0,
+            o if o == enet::PHY_READ_INITIATE + 4 => 0,
+            enet::PHY_BACKOFF => 0,
+            o if o == enet::PHY_BACKOFF + 4 => 0,
             offset if offset >= enet::STATS_BASE && offset <= enet::STATS_BASE + 0x7C => {
                 let idx = ((offset - enet::STATS_BASE) / 4) as usize;
                 if idx < self.stats.len() { self.stats[idx] } else { 0 }
@@ -968,6 +1102,20 @@ impl EnetState {
             enet::MII_CTRL => self.mii_ctrl = value,
             enet::MII_DATA => self.mii_data = value,
             enet::MII_ADDR => self.mii_addr = value,
+            enet::PHY_DATA => self.mdio_write_data(value),
+            o if o == enet::PHY_DATA + 4 => self.mdio_write_data(value),
+            enet::PHY_ADDRESS => self.phy_address = value,
+            o if o == enet::PHY_ADDRESS + 4 => self.phy_address = value,
+            enet::PHY_READ_INITIATE => {
+                self.phy_read_start = value;
+                self.mdio_initiate_read();
+            }
+            o if o == enet::PHY_READ_INITIATE + 4 => {
+                self.phy_read_start = value;
+                self.mdio_initiate_read();
+            }
+            enet::PHY_BACKOFF => {}
+            o if o == enet::PHY_BACKOFF + 4 => {}
             offset if offset >= enet::STATS_BASE && offset <= enet::STATS_BASE + 0x7C => {
                 let idx = ((offset - enet::STATS_BASE) / 4) as usize;
                 if idx < self.stats.len() { self.stats[idx] = value; }
@@ -993,7 +1141,7 @@ impl PerifState {
     pub fn read32(&mut self, offset: u32) -> u32 {
         match offset {
             offset if offset >= perif::audio::BASE && offset <= perif::audio::BASE + 0xFF => self.audio.read32(offset - perif::audio::BASE),
-            offset if offset >= perif::isa::BASE && offset <= perif::isa::BASE + 0xFF => self.isa.read32(offset - perif::isa::BASE),
+            offset if offset >= perif::isa::BASE && offset < perif::kbdms::BASE => self.isa.read32(offset - perif::isa::BASE),
             offset if offset >= perif::kbdms::BASE && offset <= perif::kbdms::BASE + 0xFF => self.kbdms.read32(offset - perif::kbdms::BASE),
             offset if offset >= perif::i2c::BASE && offset <= perif::i2c::BASE + 0xFF => self.i2c.read32(offset - perif::i2c::BASE),
             offset if offset >= perif::ustmsc::BASE && offset <= perif::ustmsc::BASE + 0xFF => self.ustmsc.read32(offset - perif::ustmsc::BASE),
@@ -1008,7 +1156,7 @@ impl PerifState {
     pub fn read32_immutable(&self, offset: u32) -> u32 {
         match offset {
             offset if offset >= perif::audio::BASE && offset <= perif::audio::BASE + 0xFF => self.audio.read32(offset - perif::audio::BASE),
-            offset if offset >= perif::isa::BASE && offset <= perif::isa::BASE + 0xFF => self.isa.read32(offset - perif::isa::BASE),
+            offset if offset >= perif::isa::BASE && offset < perif::kbdms::BASE => self.isa.read32(offset - perif::isa::BASE),
             offset if offset >= perif::kbdms::BASE && offset <= perif::kbdms::BASE + 0xFF => self.kbdms.read32_immutable(offset - perif::kbdms::BASE),
             offset if offset >= perif::i2c::BASE && offset <= perif::i2c::BASE + 0xFF => self.i2c.read32(offset - perif::i2c::BASE),
             offset if offset >= perif::ustmsc::BASE && offset <= perif::ustmsc::BASE + 0xFF => self.ustmsc.read32(offset - perif::ustmsc::BASE),
@@ -1022,11 +1170,14 @@ impl PerifState {
     pub fn write32(&mut self, offset: u32, value: u32) {
         match offset {
             offset if offset >= perif::audio::BASE && offset <= perif::audio::BASE + 0xFF => self.audio.write32(offset - perif::audio::BASE, value),
-            offset if offset >= perif::isa::BASE && offset <= perif::isa::BASE + 0xFF => {
+            offset if offset >= perif::isa::BASE && offset < perif::kbdms::BASE => {
                 self.isa.write32(offset - perif::isa::BASE, value);
-                // ISA_RING_BASE feeds the MACE audio DMA page rings.
-                if (offset - perif::isa::BASE) == perif::isa::RING_BASE {
-                    self.audio.set_ring_base(value);
+                // ISA_RING_BASE feeds the MACE audio DMA page rings.  A whole
+                // 64-bit register write arrives as two 32-bit accesses: the
+                // physical ring base lives in the low lane (offset 0x04).
+                let sub = offset - perif::isa::BASE;
+                if sub == perif::isa::RING_BASE || sub == perif::isa::RING_BASE + 4 {
+                    self.audio.set_ring_base(self.isa.ring_base as u32);
                 }
             }
             offset if offset >= perif::kbdms::BASE && offset <= perif::kbdms::BASE + 0xFF => self.kbdms.write32(offset - perif::kbdms::BASE, value),
@@ -1140,6 +1291,10 @@ impl AudioState {
     }
 
     /// The physical base address of the audio DMA ring pages.
+    ///
+    /// MACE registers are 64-bit; physical ring bases live below 4 GiB so the
+    /// low 32 bits carry the address.  The mask keeps the base within the O2's
+    /// memory/PCI window (0x0000_0000..0x1FFF_FFFF).
     pub fn set_ring_base(&mut self, base: u32) {
         self.ring_base = base & 0x1FFF_FFFF;
     }
@@ -1369,34 +1524,67 @@ impl AudioState {
 /// Offset 0x00 (`ISA_RING_BASE_AND_RESET`) holds the physical base of the
 /// MACE audio DMA ring pages; offset 0x08 (`ISA_MISC_CONTROL`) drives the
 /// front-panel LEDs (`ISA_RED_LED`/`ISA_GREEN_LED`) and flash write-enable.
+///
+/// All MACE registers are 64-bit.  A 64-bit store at address A is split by
+/// the memory layer into `write32(A, V>>32)` (high lane) then
+/// `write32(A+4, V & 0xFFFFFFFF)` (low lane).  The `low_lane` flag follows
+/// the same convention as [`AudioState`]: `offset & 4 != 0` selects the
+/// low 32 bits.
 #[derive(Debug, Default)]
 pub struct IsaState {
-    pub ring_base: u32,
-    pub misc_control: u32,
-    pub int_status: u32,
-    pub int_mask: u32,
+    ring_base: u64,
+    misc_control: u64,
+    int_status: u64,
+    int_mask: u64,
 }
 
 impl IsaState {
+    fn lane(reg: u64, low_lane: bool) -> u32 {
+        if low_lane {
+            reg as u32
+        } else {
+            (reg >> 32) as u32
+        }
+    }
+
+    fn set_lane(reg: &mut u64, low_lane: bool, value: u32) {
+        if low_lane {
+            *reg = (*reg & !0xFFFF_FFFF) | (value as u64);
+        } else {
+            *reg = ((value as u64) << 32) | (*reg & 0xFFFF_FFFF);
+        }
+    }
+
     pub fn read32(&self, offset: u32) -> u32 {
-        match offset {
+        let low_lane = offset & 4 != 0;
+        let base = offset & !7;
+        let reg = match base {
             perif::isa::RING_BASE => self.ring_base,
             perif::isa::MISC_CONTROL => self.misc_control,
             perif::isa::INT_STATUS => self.int_status,
             perif::isa::INT_MASK => self.int_mask,
+            // Serial DMA registers (not emulated; absorb reads).
+            base if base >= perif::isa::SERIAL_A_DMA && base < perif::isa::SERIAL_A_DMA + perif::isa::SERIAL_DMA_REGS => 0,
+            base if base >= perif::isa::SERIAL_B_DMA && base < perif::isa::SERIAL_B_DMA + perif::isa::SERIAL_DMA_REGS => 0,
             _ => {
                 log::warn!("ISA read32: unimplemented offset 0x{:04X}", offset);
-                0
+                return 0;
             }
-        }
+        };
+        Self::lane(reg, low_lane)
     }
 
     pub fn write32(&mut self, offset: u32, value: u32) {
-        match offset {
-            perif::isa::RING_BASE => self.ring_base = value & 0x1FFF_FFFF,
-            perif::isa::MISC_CONTROL => self.misc_control = value,
-            perif::isa::INT_STATUS => self.int_status = value,
-            perif::isa::INT_MASK => self.int_mask = value,
+        let low_lane = offset & 4 != 0;
+        let base = offset & !7;
+        match base {
+            perif::isa::RING_BASE => Self::set_lane(&mut self.ring_base, low_lane, value),
+            perif::isa::MISC_CONTROL => Self::set_lane(&mut self.misc_control, low_lane, value),
+            perif::isa::INT_STATUS => Self::set_lane(&mut self.int_status, low_lane, value),
+            perif::isa::INT_MASK => Self::set_lane(&mut self.int_mask, low_lane, value),
+            // Serial DMA registers (not emulated; absorb writes).
+            base if base >= perif::isa::SERIAL_A_DMA && base < perif::isa::SERIAL_A_DMA + perif::isa::SERIAL_DMA_REGS => {}
+            base if base >= perif::isa::SERIAL_B_DMA && base < perif::isa::SERIAL_B_DMA + perif::isa::SERIAL_DMA_REGS => {}
             _ => {
                 log::warn!("ISA write32: unimplemented offset 0x{:04X} = 0x{:08X}", offset, value);
             }
@@ -1723,7 +1911,7 @@ impl IsaExtState {
                 self.uart1.read32(offset - isa_ext::uart1::BASE)
             }
             offset if offset >= isa_ext::uart2::BASE && offset <= isa_ext::uart2::BASE + 0x7FF => self.uart2.read32(offset - isa_ext::uart2::BASE),
-            offset if offset >= isa_ext::rtc::BASE && offset <= isa_ext::rtc::BASE + 0xF0F => self.rtc.read32(offset - isa_ext::rtc::BASE),
+            offset if offset >= isa_ext::rtc::BASE && offset <= isa_ext::rtc::BASE + 0x7F07 => self.rtc.read32(offset - isa_ext::rtc::BASE),
             offset if offset >= isa_ext::game::BASE && offset <= isa_ext::game::BASE + 0x7FF => self.game.read32(offset - isa_ext::game::BASE),
             _ => {
                 log::warn!("ISA_EXT read32: unimplemented offset 0x{:05X}", offset);
@@ -1739,7 +1927,7 @@ impl IsaExtState {
             offset if offset >= isa_ext::ecp::BASE && offset <= isa_ext::ecp::BASE + 0xFF => self.ecp.read32(offset - isa_ext::ecp::BASE),
             offset if offset >= isa_ext::uart1::BASE && offset <= isa_ext::uart1::BASE + 0x7FF => self.uart1.read32_immutable(offset - isa_ext::uart1::BASE),
             offset if offset >= isa_ext::uart2::BASE && offset <= isa_ext::uart2::BASE + 0x7FF => self.uart2.read32_immutable(offset - isa_ext::uart2::BASE),
-            offset if offset >= isa_ext::rtc::BASE && offset <= isa_ext::rtc::BASE + 0xF0F => self.rtc.read32(offset - isa_ext::rtc::BASE),
+            offset if offset >= isa_ext::rtc::BASE && offset <= isa_ext::rtc::BASE + 0x7F07 => self.rtc.read32(offset - isa_ext::rtc::BASE),
             offset if offset >= isa_ext::game::BASE && offset <= isa_ext::game::BASE + 0x7FF => self.game.read32(offset - isa_ext::game::BASE),
             _ => {
                 log::warn!("ISA_EXT read32_immutable: unimplemented offset 0x{:05X}", offset);
@@ -1754,7 +1942,7 @@ impl IsaExtState {
             offset if offset >= isa_ext::ecp::BASE && offset <= isa_ext::ecp::BASE + 0xFF => self.ecp.write32(offset - isa_ext::ecp::BASE, value),
             offset if offset >= isa_ext::uart1::BASE && offset <= isa_ext::uart1::BASE + 0x7FF => self.uart1.write32(offset - isa_ext::uart1::BASE, value),
             offset if offset >= isa_ext::uart2::BASE && offset <= isa_ext::uart2::BASE + 0x7FF => self.uart2.write32(offset - isa_ext::uart2::BASE, value),
-            offset if offset >= isa_ext::rtc::BASE && offset <= isa_ext::rtc::BASE + 0xF0F => self.rtc.write32(offset - isa_ext::rtc::BASE, value),
+            offset if offset >= isa_ext::rtc::BASE && offset <= isa_ext::rtc::BASE + 0x7F07 => self.rtc.write32(offset - isa_ext::rtc::BASE, value),
             offset if offset >= isa_ext::game::BASE && offset <= isa_ext::game::BASE + 0x7FF => self.game.write32(offset - isa_ext::game::BASE, value),
             _ => {
                 log::warn!("ISA_EXT write32: unimplemented offset 0x{:05X} = 0x{:08X}", offset, value);
@@ -2179,6 +2367,74 @@ mod tests {
     use super::*;
     use crate::ip32;
 
+    /// Reproduce the PROM/`if_me` MDIO transaction: latch a (device,reg) pair
+    /// into PHY_ADDRESS, trigger a read via PHY_READ_INITIATE, then read
+    /// PHY_DATA. The onboard DP83840 must answer registers 2/3 with
+    /// `PHY_DP83840` so `mace_ether_mdio_probe` finds it.
+    #[test]
+    fn mdio_phy_probe_reads_dp83840() {
+        let mut enet = EnetState::default();
+
+        for (reg, expect) in [(2, 0x2000u32), (3, 0x05C0)] {
+            enet.write32(enet::PHY_DATA + 4, 0);
+            enet.write32(enet::PHY_ADDRESS + 4, reg); // device 0, reg `reg`
+            enet.write32(enet::PHY_READ_INITIATE + 4, reg);
+            assert_eq!(enet.read32(enet::PHY_DATA + 4) & 0xFFFF, expect);
+        }
+        // Link status reads back "up" for auto-neg/full-duplex probing.
+        enet.write32(enet::PHY_ADDRESS, 1);
+        enet.write32(enet::PHY_READ_INITIATE, 1);
+        assert_eq!(enet.read32(enet::PHY_DATA) & 0xFFFF, u32::from(PHY_STATUS));
+    }
+
+    /// MDIO writes (control RMW, reset, advertise) must land in the emulated
+    /// PHY register file.
+    #[test]
+    fn mdio_write_cycle_round_trips() {
+        let mut enet = EnetState::default();
+        enet.write32(enet::PHY_ADDRESS + 4, 0);
+        enet.write32(enet::PHY_DATA + 4, 0x8000); // PHY_PCTL_RESET
+        assert_eq!(enet.phy_ctrl, 0x1000); // folds back to AN-enabled default
+        // Writing register 4 with a custom advertise value.
+        enet.write32(enet::PHY_ADDRESS, 4);
+        enet.write32(enet::PHY_DATA, 0x01E1);
+        assert_eq!(enet.phy_advertise, 0x01E1);
+    }
+
+    /// The MACE Ethernet window PHY offsets no longer hit the unimplemented
+    /// fallback.
+    #[test]
+    fn ethernet_phy_offsets_no_longer_unimplemented() {
+        let mut enet = EnetState::default();
+        for off in [0x60, 0x64, 0x68, 0x6C, 0x70, 0x74, 0x78, 0x7C] {
+            enet.write32(off, 0x12345678);
+            let _ = enet.read32(off);
+        }
+    }
+
+    /// The MACE audio DMA ring base is delivered as a 64-bit access to the ISA
+    /// `RING_BASE` register: the memory layer splits it into high lane (0x00)
+    /// then low lane (0x04).  The low lane carries the physical base, which
+    /// must reach the codec's ring base rather than being dropped.
+    #[test]
+    fn isa_ring_base_survives_64bit_split() {
+        let (in_tx, in_rx) = std::sync::mpsc::channel();
+        let (uart2_tx, _uart2_rx) = std::sync::mpsc::channel();
+        let mut mace = Mace::with_console(in_tx.clone(), in_rx, uart2_tx);
+
+        let reg = perif::BASE + perif::isa::BASE + perif::isa::RING_BASE;
+        let base = 0x0A00_0000u32 | 0x123;
+        mace.write32(reg, 0x0000_0000); // high lane
+        mace.write32(reg + 4, base); // low lane (physical base)
+
+        // Low lane round-trips unchanged through read32.
+        assert_eq!(mace.read32(reg + 4), base);
+        assert_eq!(mace.read32(reg), 0);
+
+        // The codec's ring base was updated from the low lane (masked).
+        assert_eq!(mace.perif.audio.ring_base, base & 0x1FFF_FFFF);
+    }
+
     /// The O2 spaces 16550 byte registers at offset (reg << 8) within each
     /// UART window, so LSR (reg index 5) lives at uart1 + 0x500.
     const UART1_LSR: u32 = isa_ext::BASE + isa_ext::uart1::BASE + 5 * 0x100;
@@ -2368,23 +2624,31 @@ mod tests {
         mace.pci.write_config(0xFFFF_FFFF);
         assert_eq!(mace.read32(pci::BASE + pci::CONFIG_DATA), 0xFFFF_FF00);
 
-        // Linux assigns the BAR within PCI_LOW_MEMORY (0x1a000000).
-        let bar = ip32::PHYS_PCI_MEM + 0x4000;
-        mace.pci.write_config(bar);
-        assert_eq!(mace.pci.functions[pci::DEV_SCSI0_DEVFN as usize].bar0(), bar);
+        // The PROM assigns window-relative BARs ORed with the PCI_IO flag
+        // (ip32 pci_intf.c: e_base = 0x1000; BAR0 = e_base | PCI_IO).
+        let scsi0_offset = 0x8000_1000u32;
+        mace.pci.write_config(scsi0_offset);
+        assert_eq!(
+            mace.pci.functions[pci::DEV_SCSI0_DEVFN as usize].bar0(),
+            scsi0_offset
+        );
 
-        // Window access at bar touches ahc0 (SEECTL at +0x1e, SEERDY always set).
-        assert_ne!(mace.pci_window_read8(bar + ahc::SEECTL) & ahc::SEECTL_SEERDY, 0);
+        // Window access at PCI_LOW_MEMORY + 0x1000 touches ahc0
+        // (SEECTL at +0x1e, SEERDY always set). The MACE steers byte lanes
+        // for the big-endian CPU: host offset = chip offset ^ 3.
+        let bar = ip32::PHYS_PCI_MEM + 0x1000;
+        assert_ne!(mace.pci_window_read8(bar + (ahc::SEECTL ^ 3)) & ahc::SEECTL_SEERDY, 0);
 
-        // A second controller window (SCSI1 at a different BAR) is distinct
+        // A second controller window (SCSI1 at offset 0x2000) is distinct
         // and does not collide with the first.
-        let bar1 = ip32::PHYS_PCI_MEM + 0x8000;
+        let scsi1_offset = 0x8000_2000u32;
         mace.pci.cfg_addr = ((pci::DEV_SCSI1_DEVFN as u32) << 8) | 0x10;
-        mace.pci.write_config(bar1);
-        assert_ne!(mace.pci_window_read8(bar1 + ahc::SEECTL) & ahc::SEECTL_SEERDY, 0);
+        mace.pci.write_config(scsi1_offset);
+        let bar1 = ip32::PHYS_PCI_MEM + 0x2000;
+        assert_ne!(mace.pci_window_read8(bar1 + (ahc::SEECTL ^ 3)) & ahc::SEECTL_SEERDY, 0);
         assert_ne!(
             mace.pci.functions[pci::DEV_SCSI1_DEVFN as usize].bar0(),
-            bar
+            scsi0_offset
         );
     }
 
@@ -2394,18 +2658,21 @@ mod tests {
     fn ahc_reset_and_reg_write_through_pci_window() {
         let mut mace = Mace::new();
         mace.pci.cfg_addr = ((pci::DEV_SCSI0_DEVFN as u32) << 8) | 0x10;
-        mace.pci.write_config(ip32::PHYS_PCI_MEM);
-        let bar = ip32::PHYS_PCI_MEM;
+        mace.pci.write_config(0x8000_1000);
+        let bar = ip32::PHYS_PCI_MEM + 0x1000;
 
         // Reset with pause; the driver waits for CHIPRSTACK to set.
-        mace.pci_window_write8(bar + ahc::HCNTRL, ahc::HCNTRL_CHIPRST | ahc::HCNTRL_PAUSE);
-        assert_ne!(mace.pci_window_read8(bar + ahc::HCNTRL) & ahc::HCNTRL_CHIPRSTACK, 0);
+        // The CPU addresses HCNTRL (chip 0x87) at steered offset 0x84.
+        let hc = bar + (ahc::HCNTRL ^ 3);
+        mace.pci_window_write8(hc, ahc::HCNTRL_CHIPRST | ahc::HCNTRL_PAUSE);
+        assert_ne!(mace.pci_window_read8(hc) & ahc::HCNTRL_CHIPRSTACK, 0);
         // Un-pause clears it.
-        mace.pci_window_write8(bar + ahc::HCNTRL, ahc::HCNTRL_PAUSE);
-        assert_eq!(mace.pci_window_read8(bar + ahc::HCNTRL) & ahc::HCNTRL_CHIPRSTACK, 0);
+        mace.pci_window_write8(hc, ahc::HCNTRL_PAUSE);
+        assert_eq!(mace.pci_window_read8(hc) & ahc::HCNTRL_CHIPRSTACK, 0);
 
         // General register storage survives the byte-lane round-trip.
-        mace.pci_window_write8(bar + ahc::SCBPTR, 0x2A);
-        assert_eq!(mace.pci_window_read8(bar + ahc::SCBPTR), 0x2A);
+        let sb = bar + (ahc::SCBPTR ^ 3);
+        mace.pci_window_write8(sb, 0x2A);
+        assert_eq!(mace.pci_window_read8(sb), 0x2A);
     }
 }

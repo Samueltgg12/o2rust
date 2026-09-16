@@ -1,7 +1,8 @@
 //! Storage devices — block-device abstraction and disk-image backends.
 //!
-//! The O2's UltraWide SCSI bus (Adaptec AIC-7880) has its hard disk on
-//! **target 1** and the CD-ROM drive on **target 6**. Guest block access goes
+//! The O2's internal UltraWide SCSI bus (Adaptec AIC-7880, SCSI0) has its hard
+//! disk on **target 1** and the CD-ROM drive on **target 4**. Guest block
+//! access goes
 //! through the [`BlockDevice`] trait; this module provides the file-backed
 //! implementations:
 //!

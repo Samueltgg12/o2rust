@@ -111,22 +111,13 @@ pub fn key_to_scan_bytes(key: KeyCode, pressed: bool, out: &mut Vec<u8>) {
         return;
     }
 
-    let push = |out: &mut Vec<u8>| {
-        if extended {
-            out.push(0xE0);
-        }
-        out.push(code);
-    };
-
-    if pressed {
-        push(out);
-    } else {
-        if extended {
-            out.push(0xE0);
-        }
-        out.push(0xF0);
-        push(out);
+    if extended {
+        out.push(0xE0);
     }
+    if !pressed {
+        out.push(0xF0);
+    }
+    out.push(code);
 }
 
 /// PS/2 mouse: accumulated deltas + button mask.
@@ -165,10 +156,12 @@ impl MouseState {
         if dx == 0.0 && dy == 0.0 && !(self.left || self.right || self.middle) {
             return None;
         }
-        // The O2 PS/2 mouse reports signed 8-bit deltas; accumulate the
+        // The O2 guest mouse driver reads the vertical axis reversed from the
+        // host (host down = +dy, guest expects +Y = up), so negate dy only.
+        // X has the same sign on both sides: right = +. Accumulate the
         // fractional part so slow hosts don't stall the pointer.
         self.acc_x += dx;
-        self.acc_y += dy;
+        self.acc_y -= dy;
         let sx = self.acc_x as i16;
         let sy = self.acc_y as i16;
         self.acc_x -= f64::from(sx);
@@ -242,12 +235,16 @@ mod tests {
     #[test]
     fn mouse_packets_encode_deltas() {
         let mut mouse = MouseState::default();
+        // Host right(+x)/up(-y) → PS/2 X positive, Y positive (guest Y is
+        // reversed from the host's down-positive convention).
         let pkt = mouse.feed_motion(10.0, -5.0).unwrap();
-        // 0x08 reserved bit + Y-sign (dy negative on host = +y in PS/2 space).
-        assert_eq!(pkt, [0x08 | 0x20, 10, 0xFB]);
-        // Repeat motion with no buttons still yields a packet.
+        assert_eq!(pkt, [0x08, 10, 0x05]);
+        // Zero motion with no buttons produces no packet.
+        assert!(mouse.feed_motion(0.0, 0.0).is_none());
+        mouse.set_button(winit::event::MouseButton::Left, true);
+        // With a button held, zero motion still emits a button-only packet.
         let pkt2 = mouse.feed_motion(0.0, 0.0).unwrap();
-        assert_eq!(pkt2, [0x08, 0, 0]);
+        assert_eq!(pkt2, [0x08 | 0x01, 0, 0]);
     }
 
     #[test]

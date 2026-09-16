@@ -1,8 +1,14 @@
 //! Disk-image mounting for the CLI.
 //!
-//! - Hard disk (SCSI target 1): `.raw` / `.img` (512-byte sectors) and `.chd`
+//! - Hard disk (SCSI0 target 1): `.raw` / `.img` (512-byte sectors) and `.chd`
 //!   (via `libchdman-rs`).
-//! - CD-ROM (SCSI target 6): `.iso` / `.img` (2048-byte MODE1 sectors).
+//! - CD-ROM (SCSI0 target 4): `.iso` / `.img` (2048-byte MODE1 sectors).
+//!
+//! IRIX install and boot media are **not** ISO9660 CD-ROMs: they are EFS disks
+//! carrying a 512-byte SGI disk label / volume header (`0x0be5a941`) and use
+//! 512-byte logical sectors.  [`open_cdrom`] sniffs the image head and uses
+//! 512-byte sectors for such media, so the PROM can read their volume header
+//! and EFS filesystems just like a hard disk.
 //!
 //! When no path is given on the command line, an [`rfd`] file dialog picks one.
 
@@ -11,6 +17,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Context, Result};
 use libchdman_rs::hd::HdImage;
 use o2rust::storage::{BlockDevice, RawImage};
+
+/// Endianness-independent magic of the SGI disk label / volume header
+/// (`0x0be5a941` as stored at byte 0 of an EFS disk).
+const SGI_LABEL_MAGIC: [u8; 4] = [0x0b, 0xe5, 0xa9, 0x41];
 
 /// Extension (lower-cased, no dot) of `path`, if any.
 pub fn extension(path: &Path) -> Option<String> {
@@ -30,10 +40,31 @@ pub fn open_hard_disk(path: &Path) -> Result<Box<dyn BlockDevice>> {
 }
 
 /// Open a CD-ROM image (iso/img).
+///
+/// EFS-based IRIX media are detected by their SGI disk-label magic and
+/// presented with 512-byte sectors; plain ISO9660 images keep MODE1 2048-byte
+/// sectors.
 pub fn open_cdrom(path: &Path) -> Result<Box<dyn BlockDevice>> {
+    let sector_size = sniff_cd_sector_size(path)?;
     Ok(Box::new(
-        RawImage::open_cd(path).with_context(|| format!("opening CD-ROM {}", path.display()))?,
+        RawImage::open(path, sector_size)
+            .with_context(|| format!("opening CD-ROM {}", path.display()))?,
     ))
+}
+
+/// Pick the sector size for a `-c` image: 512 for EFS/IRIX install media
+/// (SGI disk label magic at byte 0), otherwise 2048 (ISO9660 MODE1).
+fn sniff_cd_sector_size(path: &Path) -> Result<u32> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    let mut head = [0u8; 4];
+    let n = file.read(&mut head)?;
+    if n == head.len() && head == SGI_LABEL_MAGIC {
+        Ok(512)
+    } else {
+        Ok(2048)
+    }
 }
 
 /// Opens a CHD hard-disk image through libchdman.
@@ -109,5 +140,21 @@ mod tests {
     fn extension_lowercases() {
         assert_eq!(extension(Path::new("foo.CHD")), Some("chd".to_string()));
         assert_eq!(extension(Path::new("noext")), None);
+    }
+
+    #[test]
+    fn efs_install_media_is_512_byte_sectors() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("o2rust_sniff_{}.img", std::process::id()));
+
+        // SGI disk label magic at byte 0 → EFS install disk → 512-byte sectors.
+        std::fs::write(&path, b"\x0b\xe5\xa9\x41").unwrap();
+        assert_eq!(sniff_cd_sector_size(&path).unwrap(), 512);
+
+        // Anything else falls back to ISO9660 MODE1 2048-byte sectors.
+        std::fs::write(&path, b"\x01CD001").unwrap();
+        assert_eq!(sniff_cd_sector_size(&path).unwrap(), 2048);
+
+        std::fs::remove_file(&path).unwrap();
     }
 }

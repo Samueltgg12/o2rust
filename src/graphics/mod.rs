@@ -34,7 +34,7 @@ pub const GBE_BASE: u32 = ip32::PHYS_BASE_GBE; // 0x1600_0000
 // ============================================================================
 
 /// CRIME CPU Interface register offsets (from IRIX `crime.h`).
-mod crime_cpu {
+pub mod crime_cpu {
     pub const CRM_ID: u32 = 0x00;
     pub const CRM_CONTROL: u32 = 0x08;
     pub const CRM_INTSTAT: u32 = 0x10;
@@ -74,7 +74,7 @@ mod crime_control {
 }
 
 /// CRIME Interrupt bits (IRIX `crime.h`).
-mod crime_int {
+pub mod crime_int {
     pub const VICE: u32 = 0x8000_0000;
     pub const SOFT2: u32 = 0x4000_0000;
     pub const SOFT1: u32 = 0x2000_0000;

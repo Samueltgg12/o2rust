@@ -19,8 +19,8 @@ use o2rust::system::Emulator;
 use raw_window_handle::HasWindowHandle;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event::{DeviceEvent, DeviceId, ElementState, KeyEvent, MouseButton, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, DeviceEvents, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
@@ -29,6 +29,11 @@ use crate::input::{key_to_scan_bytes, HostInput};
 
 /// Instructions executed per redraw (keeps the guest ~real-time at 60 fps).
 const STEPS_PER_FRAME: u64 = 1_000_000;
+
+/// Host-pointer → guest-pointer gain. Raw device deltas and positional diffs
+/// are both physical pixels, so one factor keeps the sensitivity consistent
+/// across the two motion sources.
+const MOUSE_SENSITIVITY: f64 = 0.25;
 
 /// Window title.
 const WINDOW_TITLE: &str = "O2Rust — SGI O2 (IP32) Workstation";
@@ -113,6 +118,7 @@ pub fn run(emulator: Emulator, audio: Option<AudioOut>) -> Result<()> {
         last_cursor: None,
         grabbed: false,
         grab_mode: None,
+        raw_deltas: false,
     };
 
     event_loop.run_app(&mut app).context("event loop failed")?;
@@ -136,11 +142,40 @@ struct WinApp {
     /// release restores `None` for the same mode.
     grabbed: bool,
     grab_mode: Option<CursorGrabMode>,
+    /// Raw `DeviceEvent::MouseMotion` deltas drive the emulated mouse while
+    /// grabbed. Raw deltas keep flowing even when a `Confined` pointer is
+    /// pinned to the window edge (no invisible walls), unlike positional
+    /// `CursorMoved` diffs; stays off as a fallback where the backend never
+    /// delivers device events.
+    raw_deltas: bool,
 }
 
 impl ApplicationHandler for WinApp {
-    fn resumed(&mut self, _event_loop: &ActiveEventLoop) {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        // Raw pointer deltas are the motion source while grabbed; ask for
+        // them regardless of focus so grabbing never starves the guest mouse.
+        event_loop.listen_device_events(DeviceEvents::Always);
         self.window.request_redraw();
+    }
+
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: DeviceId,
+        event: DeviceEvent,
+    ) {
+        if let DeviceEvent::MouseMotion { delta } = event {
+            self.raw_deltas = true;
+            if self.grabbed {
+                if let Some(pkt) = self
+                    .input
+                    .mouse
+                    .feed_motion(delta.0 * MOUSE_SENSITIVITY, delta.1 * MOUSE_SENSITIVITY)
+                {
+                    self.emulator.push_ms_packet(pkt);
+                }
+            }
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
@@ -159,7 +194,7 @@ impl ApplicationHandler for WinApp {
                 self.redraw(&self.window.inner_size());
             }
             WindowEvent::CursorMoved { position, .. } => {
-                if !self.grabbed {
+                if !self.grabbed || self.raw_deltas {
                     self.last_cursor = None;
                     return;
                 }
@@ -172,7 +207,11 @@ impl ApplicationHandler for WinApp {
                     .map(|last| position.y - last.y)
                     .unwrap_or(0.0);
                 self.last_cursor = Some(position);
-                if let Some(pkt) = self.input.mouse.feed_motion(dx * 0.25, dy * 0.25) {
+                if let Some(pkt) = self
+                    .input
+                    .mouse
+                    .feed_motion(dx * MOUSE_SENSITIVITY, dy * MOUSE_SENSITIVITY)
+                {
                     self.emulator.push_ms_packet(pkt);
                 }
             }

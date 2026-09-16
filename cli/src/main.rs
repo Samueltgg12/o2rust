@@ -117,7 +117,7 @@ fn mount_disks(emulator: &mut Emulator, args: &Args) -> Result<()> {
         Some(path) => disk::open_cdrom(std::path::Path::new(path))
             .with_context(|| format!("failed to open CD-ROM '{path}'"))?,
         None if interactive => {
-            match disk::pick_image("Select the SCSI6 CD-ROM image", &["iso", "img"], "install.iso")? {
+            match disk::pick_image("Select the SCSI0 CD-ROM image", &["iso", "img"], "install.iso")? {
                 Some(path) => disk::open_cdrom(&path)
                     .with_context(|| format!("failed to open CD-ROM '{}'", path.display()))?,
                 None => {
@@ -266,14 +266,17 @@ fn run_windowed(mut emulator: Emulator, args: &Args) -> Result<()> {
         None
     } else {
         match emulator.take_audio_consumer() {
-            Some(consumer) => match audio::start(consumer) {
-                Ok(audio) => {
-                    info!("audio output started");
-                    Some(audio)
-                }
-                Err(e) => {
-                    warn!("audio unavailable, continuing silently: {e:#}");
-                    None
+            Some(consumer) => {
+                let guest_rate = emulator.audio_sample_rate();
+                match audio::start(consumer, guest_rate) {
+                    Ok(audio) => {
+                        info!("audio output started");
+                        Some(audio)
+                    }
+                    Err(e) => {
+                        warn!("audio unavailable, continuing silently: {e:#}");
+                        None
+                    }
                 }
             },
             None => {
